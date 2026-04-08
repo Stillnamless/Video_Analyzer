@@ -1,0 +1,42 @@
+# Virtual environments
+.venv/
+.venv_new/
+videoanalyzer_env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Videos & audio (too large for GitHub)
+*.mp4
+*.webm
+*.mov
+*.wav
+*.mp3
+
+# Model weights
+*.pt
+*.pth
+*.h5
+*.onnx
+
+# Captures & temp
+captures/
+multi_face_captures/
+phone_detected_frames/
+head_movement/
+temp/
+temp_audio.wav
+
+# Misc
+node_modules/
+package-lock.json
+*.rtf
