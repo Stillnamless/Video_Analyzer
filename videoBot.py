@@ -428,8 +428,8 @@ qa_set = {
 }
 
 # ─── MediaPipe Setup ─────────────────────────────────────────────────
-mp_face_mesh = mp.solutions.face_mesh
-mp_pose = mp.solutions.pose
+import mediapipe.python.solutions.face_mesh as mp_face_mesh
+import mediapipe.python.solutions.pose as mp_pose
 face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True)
 pose_detector = mp_pose.Pose(static_image_mode=True)
 
