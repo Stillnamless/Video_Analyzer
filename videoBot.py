@@ -4,6 +4,7 @@ import subprocess
 import librosa
 import tempfile
 import os
+import pickle
 import whisper
 from collections import deque
 from deepface import DeepFace
@@ -12,6 +13,49 @@ import numpy as np
 import pandas as pd
 import re
 from sentence_transformers import SentenceTransformer, util
+
+# ─── Custom Model Paths ──────────────────────────────────────────────
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+_EMOTION_MODEL_PATH = os.path.join(_ROOT, "trained_models", "emotion_cnn.keras")
+_GAZE_MODEL_PATH    = os.path.join(_ROOT, "trained_models", "gaze_blink_model.pkl")
+_VOICE_MODEL_PATH   = os.path.join(_ROOT, "trained_models", "voice_regressor.pkl")
+
+_EMOTION_LABELS = ["angry", "disgust", "fear", "happy", "sad", "surprise", "neutral"]
+
+
+# ─── Custom Model Loaders ─────────────────────────────────────────────
+@st.cache_resource
+def load_custom_emotion_model():
+    """Load trained CNN. Returns None if not yet trained."""
+    if not os.path.exists(_EMOTION_MODEL_PATH):
+        return None
+    try:
+        import tensorflow as tf
+        return tf.keras.models.load_model(_EMOTION_MODEL_PATH)
+    except Exception:
+        return None
+
+@st.cache_resource
+def load_custom_gaze_model():
+    """Load trained Gaze MLP pipeline. Returns None if not yet trained."""
+    if not os.path.exists(_GAZE_MODEL_PATH):
+        return None
+    try:
+        with open(_GAZE_MODEL_PATH, "rb") as f:
+            return pickle.load(f)
+    except Exception:
+        return None
+
+@st.cache_resource
+def load_custom_voice_model():
+    """Load trained Voice Regressor pipeline. Returns None if not yet trained."""
+    if not os.path.exists(_VOICE_MODEL_PATH):
+        return None
+    try:
+        with open(_VOICE_MODEL_PATH, "rb") as f:
+            return pickle.load(f)
+    except Exception:
+        return None
 
 # ─── Page Config ──────────────────────────────────────────────────────
 st.set_page_config(
@@ -433,6 +477,72 @@ import mediapipe.python.solutions.pose as mp_pose
 face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True)
 pose_detector = mp_pose.Pose(static_image_mode=True)
 
+# Eye landmarks for custom gaze model
+_L_TOP, _L_BOT, _L_LEFT, _L_RIGHT = 159, 145, 33, 133
+_R_TOP, _R_BOT, _R_LEFT, _R_RIGHT = 386, 374, 362, 263
+_NOSE, _FACE_L, _FACE_R = 1, 234, 454
+
+
+def _gaze_features(landmarks):
+    """Extract 12-dim feature vector from face landmarks for gaze model."""
+    def ear(t, b, l, r):
+        return abs(landmarks[t].y - landmarks[b].y) / (abs(landmarks[l].x - landmarks[r].x) + 1e-6)
+    lx = (landmarks[_L_LEFT].x + landmarks[_L_RIGHT].x) / 2
+    ly = (landmarks[_L_TOP].y  + landmarks[_L_BOT].y)  / 2
+    rx = (landmarks[_R_LEFT].x + landmarks[_R_RIGHT].x) / 2
+    ry = (landmarks[_R_TOP].y  + landmarks[_R_BOT].y)  / 2
+    fw = abs(landmarks[_FACE_L].x - landmarks[_FACE_R].x)
+    gh = (landmarks[_NOSE].x - landmarks[_FACE_L].x) / (fw + 1e-6) - 0.5
+    gv = landmarks[_NOSE].y - landmarks[4].y
+    es = abs(ly - ry)
+    return [ear(_L_TOP,_L_BOT,_L_LEFT,_L_RIGHT), ear(_R_TOP,_R_BOT,_R_LEFT,_R_RIGHT),
+            lx, ly, rx, ry, landmarks[_NOSE].x, landmarks[_NOSE].y, fw, gh, gv, es]
+
+
+def _predict_gaze(landmarks, gaze_model):
+    """Returns (blink: bool, gaze_forward: bool) using custom model or fallback."""
+    if gaze_model is not None:
+        feats = np.array([_gaze_features(landmarks)])
+        pred = gaze_model.predict(feats)[0]  # [blink, gaze]
+        return bool(pred[0]), bool(pred[1])
+    # Fallback: geometric thresholds
+    blink = abs(landmarks[_L_TOP].y - landmarks[_L_BOT].y) < 0.015
+    gaze_forward = abs(landmarks[33].x - landmarks[263].x) > 0.18
+    return blink, gaze_forward
+
+
+def _predict_emotion_custom(frame_rgb, emotion_model):
+    """Predict emotion using custom CNN. Returns emotion string."""
+    try:
+        import tensorflow as tf
+        gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
+        gray = cv2.resize(gray, (48, 48))
+        inp  = gray.astype("float32") / 255.0
+        inp  = inp.reshape(1, 48, 48, 1)
+        probs = emotion_model.predict(inp, verbose=0)[0]
+        return _EMOTION_LABELS[int(np.argmax(probs))]
+    except Exception:
+        return None
+
+
+def _predict_voice_confidence(y_audio, sr, voice_model):
+    """Predict voice confidence score using custom regressor."""
+    try:
+        mfcc = librosa.feature.mfcc(y=y_audio, sr=sr, n_mfcc=40)
+        mfcc_mean = np.mean(mfcc, axis=1)
+        rms       = np.mean(librosa.feature.rms(y=y_audio))
+        centroid  = np.mean(librosa.feature.spectral_centroid(y=y_audio, sr=sr))
+        zcr       = np.mean(librosa.feature.zero_crossing_rate(y=y_audio))
+        onset_env = librosa.onset.onset_strength(y=y_audio, sr=sr)
+        tempo     = librosa.beat.tempo(onset_envelope=onset_env, sr=sr)[0]
+        pitch     = librosa.yin(y_audio, fmin=50, fmax=400)
+        pitch_std = np.std(pitch[pitch > 0]) if np.any(pitch > 0) else 0.0
+        feats = np.concatenate([mfcc_mean, [rms, centroid, zcr, tempo, pitch_std]]).reshape(1, -1)
+        score = float(voice_model.predict(feats)[0])
+        return max(0.0, min(10.0, score))
+    except Exception:
+        return None
+
 
 # ─── Analysis Functions ──────────────────────────────────────────────
 def evaluate_technical_answers(transcript, qa_set):
@@ -559,6 +669,11 @@ def detect_posture(frame):
 
 
 def analyze_confidence(video_path):
+    # Load custom trained models (returns None if not yet trained)
+    emotion_model = load_custom_emotion_model()
+    gaze_model    = load_custom_gaze_model()
+    voice_model   = load_custom_voice_model()
+
     cap = cv2.VideoCapture(video_path)
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     interval = max(frame_count // 30, 1)
@@ -570,6 +685,7 @@ def analyze_confidence(video_path):
     expression_scores = []
     gaze_scores = []
     posture_scores = []
+    emotion_timeline = []  # NEW
 
     expr_score_map = {"happy": 10, "neutral": 7, "surprise": 5, "sad": 3, "angry": 2, "fear": 2, "disgust": 1}
 
@@ -581,33 +697,41 @@ def analyze_confidence(video_path):
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        try:
-            analysis = DeepFace.analyze(rgb, actions=["emotion"], enforce_detection=False, silent=True)
-            emotion = analysis[0]["dominant_emotion"]
-        except Exception:
-            emotion = "neutral"
+        # Custom CNN first, DeepFace fallback
+        emotion = None
+        if emotion_model is not None:
+            emotion = _predict_emotion_custom(rgb, emotion_model)
+        if emotion is None:
+            try:
+                analysis = DeepFace.analyze(rgb, actions=["emotion"], enforce_detection=False, silent=True)
+                emotion = analysis[0]["dominant_emotion"]
+            except Exception:
+                emotion = "neutral"
 
         expression_scores.append(expr_score_map.get(emotion, 5))
+        emotion_timeline.append(emotion)
 
         results = face_mesh.process(rgb)
         if results.multi_face_landmarks:
-            face = results.multi_face_landmarks[0]
-            if detect_blink(face.landmark):
+            face_lm = results.multi_face_landmarks[0]
+            is_blink, is_forward = _predict_gaze(face_lm.landmark, gaze_model)
+            if is_blink:
                 blink_count += 1
             total_blink_frames += 1
-            nose_x = face.landmark[1].x
+            nose_x = face_lm.landmark[1].x
             head_movement_values.append(detect_head_movement(head_positions, nose_x))
-            gaze_scores.append(1 if is_facing_forward(face.landmark) else 0)
+            gaze_scores.append(1 if is_forward else 0)
 
         posture_scores.append(detect_posture(frame))
 
     cap.release()
 
     if not expression_scores:
-        return "neutral", 0.0, ""
+        return "neutral", 0.0, "", [], 0.0
 
     avg_expression = np.mean(expression_scores)
-    avg_gaze = np.mean(gaze_scores) if gaze_scores else 0.5
+    eye_contact_pct = round(np.mean(gaze_scores) * 100, 1) if gaze_scores else 0.0
+    avg_gaze = eye_contact_pct / 100.0
     avg_posture = np.mean(posture_scores)
     avg_blink_rate = blink_count / total_blink_frames if total_blink_frames > 0 else 0
     blink_score = max(0, min(10 - (avg_blink_rate * 100), 10))
@@ -617,7 +741,13 @@ def analyze_confidence(video_path):
 
     audio_path = extract_audio(video_path)
     transcript, fluency_score = transcribe_and_analyze_fluency(audio_path)
-    voice_score = analyze_voice_confidence(audio_path)
+
+    # Custom voice regressor or Librosa heuristic fallback
+    if voice_model is not None:
+        y_audio, sr_audio = librosa.load(audio_path)
+        voice_score = _predict_voice_confidence(y_audio, sr_audio, voice_model) or 0.0
+    else:
+        voice_score = analyze_voice_confidence(audio_path)
 
     confidence_score = round(
         0.25 * avg_expression +
@@ -629,7 +759,8 @@ def analyze_confidence(video_path):
         0.05 * head_score, 2
     )
     confidence_score = min(confidence_score, 10.0)
-    return emotion, confidence_score, transcript
+    dominant_emotion = max(set(emotion_timeline), key=emotion_timeline.count) if emotion_timeline else "neutral"
+    return dominant_emotion, confidence_score, transcript, emotion_timeline, eye_contact_pct
 
 
 # ─── Helper Functions ─────────────────────────────────────────────────
@@ -733,13 +864,24 @@ if uploaded_videos:
             st.video(video_path)
 
         with st.spinner(f"🔍 Analyzing Candidate {i+1} — this may take a minute..."):
-            dominant_emotion, conf_score, transcript = analyze_confidence(video_path)
+            dominant_emotion, conf_score, transcript, emotion_timeline, eye_contact_pct = analyze_confidence(video_path)
             qa_results, tech_score = evaluate_technical_answers(transcript, qa_set)
             total_score = round((conf_score + tech_score) / 2, 2)
 
+        # ── Grade Computation ──
+        def compute_grade(score):
+            if score >= 8.5: return "A+", "#34d399"
+            if score >= 7.5: return "A", "#34d399"
+            if score >= 6.5: return "B+", "#818cf8"
+            if score >= 5.5: return "B", "#818cf8"
+            if score >= 4.5: return "C", "#fbbf24"
+            if score >= 3.5: return "D", "#fb923c"
+            return "F", "#f87171"
+        grade, grade_color = compute_grade(total_score)
+
         # ── Score Rings ──
         st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5 = st.columns(5)
         with c1:
             st.markdown(render_score_ring(conf_score, "Confidence"), unsafe_allow_html=True)
         with c2:
@@ -747,17 +889,46 @@ if uploaded_videos:
         with c3:
             st.markdown(render_score_ring(total_score, "Overall"), unsafe_allow_html=True)
         with c4:
+            st.markdown(render_score_ring(round(eye_contact_pct / 10, 1), "Eye Contact"), unsafe_allow_html=True)
+        with c5:
             emoji = emotion_emoji(dominant_emotion)
             st.markdown(f"""
-            <div style='text-align:center; padding: 16px 0;'>
+            <div style='text-align:center; padding: 8px 0;'>
                 <div class='emotion-chip'>
                     <span class='emotion-chip-emoji'>{emoji}</span>
                     <span class='emotion-chip-text'>{dominant_emotion}</span>
                 </div>
-                <div class='score-ring-caption' style='margin-top:12px'>Dominant Emotion</div>
+                <div class='score-ring-caption' style='margin-top:8px'>Dominant Emotion</div>
+                <div style='margin-top:10px;'>
+                    <span style='font-size:2rem; font-weight:900; color:{grade_color};'>{grade}</span>
+                    <div class='score-ring-caption'>Grade</div>
+                </div>
             </div>
             """, unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
+
+        # ── Emotion Timeline ──
+        if emotion_timeline:
+            st.markdown("""
+            <div class='section-header'>
+                <div class='section-header-icon'>📊</div>
+                <div class='section-header-text'>Emotion Timeline</div>
+            </div>
+            """, unsafe_allow_html=True)
+            emotion_order = ["happy", "neutral", "surprise", "sad", "angry", "fear", "disgust"]
+            emotion_color_map = {"happy": "#34d399", "neutral": "#818cf8", "surprise": "#fbbf24",
+                                  "sad": "#60a5fa", "angry": "#f87171", "fear": "#c084fc", "disgust": "#a3e635"}
+            timeline_df = pd.DataFrame({"Frame": range(len(emotion_timeline)), "Emotion": emotion_timeline})
+            counts = timeline_df["Emotion"].value_counts().reindex(emotion_order, fill_value=0)
+            bar_html = "<div style='display:flex; gap:8px; align-items:flex-end; height:80px; padding: 8px 0;'>"
+            max_count = max(counts.values) + 1
+            for em, ct in counts.items():
+                if ct == 0: continue
+                h = int((ct / max_count) * 70)
+                c = emotion_color_map.get(em, "#818cf8")
+                bar_html += f"<div style='display:flex;flex-direction:column;align-items:center;gap:3px;'><div style='width:36px;height:{h}px;background:{c};border-radius:4px 4px 0 0;opacity:0.85;'></div><div style='font-size:0.6rem;color:#9ca3af;'>{em[:3]}</div><div style='font-size:0.65rem;font-weight:700;color:{c};'>{ct}</div></div>"
+            bar_html += "</div>"
+            st.markdown(f"<div class='glass-card'>{bar_html}</div>", unsafe_allow_html=True)
 
         # ── Transcript ──
         with st.expander("📄 View Full Transcript"):
