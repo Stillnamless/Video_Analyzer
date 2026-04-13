@@ -1,8 +1,22 @@
+"""
+Audio analysis utilities.
+
+ML Models used in this module
+------------------------------
+1. OpenAI Whisper ("base")
+   - Library : openai-whisper
+   - Task    : Automatic speech recognition (ASR) — converts the audio
+               track of the video into a text transcript.
+   - Model   : The "base" Whisper model (~74 M parameters), a
+               Transformer-based encoder-decoder trained by OpenAI on
+               680,000 hours of multilingual audio.
+"""
+
 import subprocess
 import whisper
 import re
 import librosa
-import numpy as np     
+import numpy as np
 
 
 def extract_audio(video_path, audio_path = "temp_audio.wav"):

@@ -1,3 +1,26 @@
+"""
+Expression and confidence analysis utilities.
+
+ML Models used in this module
+------------------------------
+1. DeepFace (emotion analysis)
+   - Library : deepface
+   - Task    : Classifies the dominant facial emotion in each video frame
+               (happy, neutral, surprise, sad, angry, fear, disgust).
+   - Backend : DeepFace defaults to the VGG-Face deep-learning model for
+               face recognition / emotion detection.  Other backends
+               (Facenet, OpenFace, DeepFace, ArcFace …) can be selected
+               via the `detector_backend` argument.
+
+2. MediaPipe Face Mesh
+   - Library : mediapipe (mp.solutions.face_mesh)
+   - Task    : Detects 468 facial landmarks per frame; these landmarks are
+               used to estimate gaze direction, blink rate, and lateral
+               head movement.
+   - Model   : A lightweight CNN-based face-mesh model included with the
+               mediapipe package.
+"""
+
 from collections import deque
 import cv2
 from utils.audio_utils import extract_audio, transcribe_and_analyze_fluency, analyze_voice_confidence

@@ -1,3 +1,17 @@
+"""
+Video-level vision utilities (blink, head-movement, gaze, posture).
+
+ML Models used in this module
+------------------------------
+1. MediaPipe Pose
+   - Library : mediapipe (mp.solutions.pose)
+   - Task    : Full-body pose estimation — detects 33 body landmarks per
+               frame; used here to evaluate shoulder alignment and head
+               position as a proxy for posture confidence.
+   - Model   : A lightweight BlazePose CNN model included with the
+               mediapipe package.
+"""
+
 import numpy as np                
 import cv2
 import mediapipe as mp
