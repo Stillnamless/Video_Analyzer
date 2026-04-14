@@ -56,41 +56,62 @@ def make_dataset(directory, augment=False):
     return ds.cache().prefetch(tf.data.AUTOTUNE)
 
 
-# ── Model Architecture ───────────────────────────────────────────────────────
+# ── Model Architecture (Upgraded to Custom ResNet) ─────────────────────────
+def residual_block(x, filters, kernel_size=3):
+    """A basic residual block (skip-connection) to combat vanishing gradients."""
+    shortcut = x
+    
+    # Path 1
+    x = layers.Conv2D(filters, kernel_size, padding="same", 
+                      kernel_regularizer=keras.regularizers.l2(0.001))(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation("relu")(x)
+    
+    # Path 2
+    x = layers.Conv2D(filters, kernel_size, padding="same",
+                      kernel_regularizer=keras.regularizers.l2(0.001))(x)
+    x = layers.BatchNormalization()(x)
+    
+    # Match dimensions for shortcut jump if filters increased
+    if shortcut.shape[-1] != filters:
+        shortcut = layers.Conv2D(filters, 1, padding="same")(shortcut)
+        shortcut = layers.BatchNormalization()(shortcut)
+        
+    x = layers.Add()([shortcut, x])
+    x = layers.Activation("relu")(x)
+    return x
+
+
 def build_emotion_cnn():
     inputs = keras.Input(shape=(IMG_SIZE, IMG_SIZE, 1))
 
-    # Block 1
-    x = layers.Conv2D(32, 3, padding="same", activation="relu")(inputs)
-    x = layers.BatchNormalization()(x)
-    x = layers.Conv2D(32, 3, padding="same", activation="relu")(x)
+    # Initial Convolution
+    x = layers.Conv2D(64, 3, padding="same", activation="relu")(inputs)
     x = layers.BatchNormalization()(x)
     x = layers.MaxPooling2D()(x)
-    x = layers.Dropout(0.25)(x)
 
-    # Block 2
-    x = layers.Conv2D(64, 3, padding="same", activation="relu")(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.Conv2D(64, 3, padding="same", activation="relu")(x)
-    x = layers.BatchNormalization()(x)
+    # Residual Block 1
+    x = residual_block(x, 64)
     x = layers.MaxPooling2D()(x)
-    x = layers.Dropout(0.25)(x)
+    x = layers.Dropout(0.3)(x)
 
-    # Block 3
-    x = layers.Conv2D(128, 3, padding="same", activation="relu")(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.Conv2D(128, 3, padding="same", activation="relu")(x)
-    x = layers.BatchNormalization()(x)
+    # Residual Block 2
+    x = residual_block(x, 128)
     x = layers.MaxPooling2D()(x)
     x = layers.Dropout(0.4)(x)
 
+    # Residual Block 3
+    x = residual_block(x, 256)
+    x = layers.MaxPooling2D()(x)
+    x = layers.Dropout(0.5)(x)
+
     # Classifier Head
     x = layers.GlobalAveragePooling2D()(x)
-    x = layers.Dense(256, activation="relu")(x)
+    x = layers.Dense(256, activation="relu", kernel_regularizer=keras.regularizers.l2(0.001))(x)
     x = layers.Dropout(0.5)(x)
     outputs = layers.Dense(NUM_CLASSES, activation="softmax")(x)
 
-    model = keras.Model(inputs, outputs, name="EmotionCNN")
+    model = keras.Model(inputs, outputs, name="Advanced_Emotion_ResNet")
     return model
 
 

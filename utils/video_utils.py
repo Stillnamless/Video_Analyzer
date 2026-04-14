@@ -1,8 +1,15 @@
 import numpy as np                
 import cv2
+from functools import lru_cache
 import mediapipe as mp
 mp_pose = mp.solutions.pose
-pose_detector = mp_pose.Pose(static_image_mode=True)
+
+@lru_cache(maxsize=1)
+def get_pose_detector():
+    return mp_pose.Pose(
+        static_image_mode=True,
+        min_detection_confidence=0.5
+    )
 
 def detect_blink(landmarks):
     left_eye_top = landmarks[159]
@@ -25,6 +32,7 @@ def is_facing_forward(landmarks):
 
 # posture detection
 def detect_posture(frame):
+    pose_detector = get_pose_detector()
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     result = pose_detector.process(rgb)
     

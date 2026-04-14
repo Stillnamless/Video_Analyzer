@@ -1,9 +1,11 @@
 streamlit>=1.30.0
-opencv-python-headless>=4.8.0
+opencv-python-headless<4.12
+opencv-python<4.12
+opencv-contrib-python<4.12
 librosa>=0.10.0
-numpy<2
+numpy>=1.26,<2
 pandas>=2.0.0
-mediapipe>=0.10.9
+mediapipe==0.10.9
 deepface==0.0.95
 tf-keras
 sentence-transformers>=2.2.0

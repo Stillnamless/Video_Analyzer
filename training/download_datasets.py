@@ -25,22 +25,47 @@ os.makedirs(RAVDESS_DIR, exist_ok=True)
 
 def download_fer2013():
     print("Downloading FER-2013 from Kaggle...")
-    kaggle_json = os.path.expanduser("~/.kaggle/kaggle.json")
-    if not os.path.exists(kaggle_json):
-        print("ERROR: ~/.kaggle/kaggle.json not found.")
-        print("Please download your Kaggle API token from https://www.kaggle.com/settings")
-        return False
 
-    result = subprocess.run(
-        ["kaggle", "datasets", "download", "-d", "msambare/fer2013", "-p", FER_DIR, "--unzip"],
-        capture_output=True, text=True
-    )
-    if result.returncode == 0:
+    # Method 1: existing kaggle.json file
+    kaggle_json = os.path.expanduser("~/.kaggle/kaggle.json")
+    if os.path.exists(kaggle_json):
+        result = subprocess.run(
+            ["kaggle", "datasets", "download", "-d", "msambare/fer2013", "-p", FER_DIR, "--unzip"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            print(f"FER-2013 downloaded to {FER_DIR}")
+            return True
+        print("Kaggle CLI failed:", result.stderr)
+
+    # Method 2: interactive credentials via opendatasets
+    print("\nNo kaggle.json found. Trying interactive login...")
+    print("You'll need your Kaggle username + API key from https://www.kaggle.com/settings → 'Create New API Token'")
+    try:
+        import opendatasets as od
+        od.download("https://www.kaggle.com/datasets/msambare/fer2013", data_dir=DATA_DIR)
+        # opendatasets saves to data_dir/fer2013/
         print(f"FER-2013 downloaded to {FER_DIR}")
         return True
-    else:
-        print("Error:", result.stderr)
-        return False
+    except ImportError:
+        print("Installing opendatasets...")
+        subprocess.run(["pip", "install", "opendatasets", "-q"])
+        try:
+            import opendatasets as od
+            od.download("https://www.kaggle.com/datasets/msambare/fer2013", data_dir=DATA_DIR)
+            return True
+        except Exception as e:
+            print(f"opendatasets failed: {e}")
+
+    # Method 3: manual instructions
+    print("\n" + "="*60)
+    print("MANUAL DOWNLOAD INSTRUCTIONS:")
+    print("1. Go to: https://www.kaggle.com/datasets/msambare/fer2013")
+    print("2. Click 'Download' → Download ZIP")
+    print(f"3. Extract to: {FER_DIR}")
+    print("   It should contain: train/ and test/ subdirectories")
+    print("="*60 + "\n")
+    return False
 
 
 def download_ravdess():

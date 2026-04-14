@@ -40,3 +40,7 @@ temp_audio.wav
 node_modules/
 package-lock.json
 *.rtf
+
+# Data & Logs
+training/data/
+training/logs/

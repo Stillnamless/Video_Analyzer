@@ -1,4 +1,5 @@
 from collections import deque
+from functools import lru_cache
 import cv2
 from utils.audio_utils import extract_audio, transcribe_and_analyze_fluency, analyze_voice_confidence
 from utils.video_utils import detect_blink, detect_head_movement, is_facing_forward, detect_posture
@@ -7,10 +8,17 @@ from deepface import DeepFace
 import mediapipe as mp
 mp_face_mesh = mp.solutions.face_mesh
 
-face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True)
+@lru_cache(maxsize=1)
+def get_face_mesh():
+    return mp_face_mesh.FaceMesh(
+        static_image_mode=True,
+        max_num_faces=1,
+        min_detection_confidence=0.5
+    )
 
 
 def analyze_confidence(video_path):
+    face_mesh = get_face_mesh()
     cap = cv2.VideoCapture(video_path)
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     interval = max(frame_count // 30, 1)

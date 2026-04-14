@@ -1,1033 +1,1457 @@
-import streamlit as st
-import cv2
-import subprocess
-import librosa
-import tempfile
+import json
 import os
-import pickle
-import whisper
-from collections import deque
-from deepface import DeepFace
-import mediapipe as mp
-import numpy as np
+import tempfile
+from textwrap import dedent
+
 import pandas as pd
-import re
-from sentence_transformers import SentenceTransformer, util
+import streamlit as st
 
-# ─── Custom Model Paths ──────────────────────────────────────────────
-_ROOT = os.path.dirname(os.path.abspath(__file__))
-_EMOTION_MODEL_PATH = os.path.join(_ROOT, "trained_models", "emotion_cnn.keras")
-_GAZE_MODEL_PATH    = os.path.join(_ROOT, "trained_models", "gaze_blink_model.pkl")
-_VOICE_MODEL_PATH   = os.path.join(_ROOT, "trained_models", "voice_regressor.pkl")
-
-_EMOTION_LABELS = ["angry", "disgust", "fear", "happy", "sad", "surprise", "neutral"]
+from questions import qa_set
+from utils.analysis_engine import CandidateAnalysis, analyze_video, get_app_model_statuses
 
 
-# ─── Custom Model Loaders ─────────────────────────────────────────────
-@st.cache_resource
-def load_custom_emotion_model():
-    """Load trained CNN. Returns None if not yet trained."""
-    if not os.path.exists(_EMOTION_MODEL_PATH):
-        return None
-    try:
-        import tensorflow as tf
-        return tf.keras.models.load_model(_EMOTION_MODEL_PATH)
-    except Exception:
-        return None
-
-@st.cache_resource
-def load_custom_gaze_model():
-    """Load trained Gaze MLP pipeline. Returns None if not yet trained."""
-    if not os.path.exists(_GAZE_MODEL_PATH):
-        return None
-    try:
-        with open(_GAZE_MODEL_PATH, "rb") as f:
-            return pickle.load(f)
-    except Exception:
-        return None
-
-@st.cache_resource
-def load_custom_voice_model():
-    """Load trained Voice Regressor pipeline. Returns None if not yet trained."""
-    if not os.path.exists(_VOICE_MODEL_PATH):
-        return None
-    try:
-        with open(_VOICE_MODEL_PATH, "rb") as f:
-            return pickle.load(f)
-    except Exception:
-        return None
-
-# ─── Page Config ──────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="InterviewIQ — AI Interview Analyzer",
+    page_title="InterviewIQ · AI Interview Intelligence",
     page_icon="🧠",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="collapsed",
 )
 
-# ─── Premium CSS ──────────────────────────────────────────────────────
-st.markdown("""
+
+def html_block(markup: str) -> str:
+    return dedent(markup).strip()
+
+
+# ─── GLOBAL STYLES ────────────────────────────────────────────────────────────
+st.markdown(
+    html_block(
+        """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
 
-/* ── Global ── */
-*, html, body, [class*="css"] {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
-}
-.main { background: #0a0b14; }
-.stApp { background: #0a0b14; }
-header[data-testid="stHeader"] { background: transparent; }
-section[data-testid="stSidebar"] { background: #0d0e1a; }
-.block-container { padding-top: 1rem; max-width: 1200px; }
-hr { border-color: rgba(99,102,241,0.15) !important; }
+/* ── TOKENS ─────────────────────────────────────────── */
+:root {
+    --bg:           #0e0d15;
+    --bg-low:       #13131a;
+    --surf:         #1b1b23;
+    --surf-mid:     #1f1f27;
+    --surf-high:    #2a2931;
+    --surf-top:     #34343c;
 
-/* ── Scrollbar ── */
+    --primary:      #c0c1ff;
+    --primary-dim:  #8083ff;
+    --primary-raw:  #6366f1;
+    --secondary:    #4cd7f6;
+    --secondary-raw:#06b6d4;
+    --tertiary:     #ffb783;
+    --success:      #10b981;
+    --warning:      #f59e0b;
+    --danger:       #ef4444;
+
+    --on-bg:        #e4e1ec;
+    --on-surf:      #e4e1ec;
+    --on-muted:     #c7c4d7;
+    --on-faint:     #908fa0;
+
+    --outline:      rgba(192,193,255,0.10);
+    --glow-ind:     rgba(99,102,241,0.18);
+    --glow-cyan:    rgba(6,182,212,0.14);
+
+    --radius-xl:    24px;
+    --radius-lg:    18px;
+    --radius-md:    12px;
+    --radius-sm:    8px;
+    --radius-pill:  999px;
+
+    --blur:         blur(14px);
+    --font:         'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+/* ── RESET & BASE ────────────────────────────────────── */
+html, body, .stApp, button, input, textarea, select {
+    font-family: var(--font) !important;
+    color: var(--on-bg);
+}
+
+.stApp {
+    background: var(--bg) !important;
+}
+
+/* ── ANIMATED STAR FIELD ─────────────────────────────── */
+.stApp::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+        radial-gradient(1px 1px at 15% 22%, rgba(192,193,255,0.55) 0%, transparent 100%),
+        radial-gradient(1px 1px at 72% 8%,  rgba(76,215,246,0.45) 0%, transparent 100%),
+        radial-gradient(1.5px 1.5px at 40% 55%, rgba(192,193,255,0.40) 0%, transparent 100%),
+        radial-gradient(1px 1px at 88% 35%, rgba(255,183,131,0.30) 0%, transparent 100%),
+        radial-gradient(1px 1px at 60% 78%, rgba(76,215,246,0.35) 0%, transparent 100%),
+        radial-gradient(1px 1px at 5%  90%, rgba(192,193,255,0.35) 0%, transparent 100%),
+        radial-gradient(1px 1px at 93% 70%, rgba(192,193,255,0.25) 0%, transparent 100%),
+        radial-gradient(1px 1px at 28% 12%, rgba(76,215,246,0.30) 0%, transparent 100%),
+        radial-gradient(1px 1px at 55% 42%, rgba(255,183,131,0.20) 0%, transparent 100%),
+        radial-gradient(1px 1px at 80% 88%, rgba(192,193,255,0.25) 0%, transparent 100%);
+    pointer-events: none;
+    z-index: 0;
+}
+
+/* ── AMBIENT GLOW ORBS ───────────────────────────────── */
+.stApp::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background:
+        radial-gradient(ellipse 60% 40% at 20% 10%,  rgba(99,102,241,0.10) 0%, transparent 60%),
+        radial-gradient(ellipse 50% 35% at 85% 15%,  rgba(6,182,212,0.08) 0%, transparent 55%),
+        radial-gradient(ellipse 40% 30% at 50% 90%,  rgba(99,102,241,0.08) 0%, transparent 50%);
+    pointer-events: none;
+    z-index: 0;
+}
+
+header[data-testid="stHeader"] { background: transparent !important; }
+
+.block-container {
+    padding-top: 1.2rem !important;
+    padding-bottom: 3rem !important;
+    max-width: 1280px !important;
+    position: relative;
+    z-index: 1;
+}
+
+hr { border-color: var(--outline) !important; }
+
+/* ── SCROLLBAR ───────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { background: #0a0b14; }
-::-webkit-scrollbar-thumb { background: #4f46e5; border-radius: 4px; }
-
-/* ── Animated Hero ── */
-.hero-container {
-    text-align: center;
-    padding: 48px 20px 32px;
-    position: relative;
-}
-.hero-badge {
-    display: inline-block;
-    padding: 6px 18px;
-    background: rgba(99,102,241,0.12);
-    border: 1px solid rgba(99,102,241,0.25);
-    border-radius: 999px;
-    color: #818cf8;
-    font-size: 0.78rem;
-    font-weight: 600;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    margin-bottom: 16px;
-}
-.hero-title {
-    font-size: 3.2rem;
-    font-weight: 900;
-    line-height: 1.1;
-    margin-bottom: 12px;
-    background: linear-gradient(135deg, #c7d2fe 0%, #818cf8 30%, #6366f1 50%, #a78bfa 70%, #c4b5fd 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    animation: shimmer 3s ease-in-out infinite alternate;
-}
-@keyframes shimmer {
-    0% { background-position: 0% 50%; }
-    100% { background-position: 100% 50%; }
-}
-.hero-subtitle {
-    font-size: 1.05rem;
-    color: #6b7280;
-    max-width: 560px;
-    margin: 0 auto;
-    line-height: 1.6;
+::-webkit-scrollbar-track { background: var(--bg-low); }
+::-webkit-scrollbar-thumb {
+    background: rgba(128,131,255,0.35);
+    border-radius: 99px;
 }
 
-/* ── Glass Card ── */
-.glass-card {
-    background: rgba(17,19,35,0.65);
-    backdrop-filter: blur(24px);
-    -webkit-backdrop-filter: blur(24px);
-    border: 1px solid rgba(99,102,241,0.12);
-    border-radius: 16px;
-    padding: 24px;
+/* ════════════════════════════════════════════════════════
+   HERO SECTION
+   ════════════════════════════════════════════════════════ */
+.hero-wrap {
     position: relative;
+    padding: 48px 52px 44px;
+    border-radius: var(--radius-xl);
+    border: 1px solid var(--outline);
+    background: linear-gradient(
+        135deg,
+        rgba(27,27,35,0.95) 0%,
+        rgba(19,19,26,0.90) 100%
+    );
+    backdrop-filter: var(--blur);
+    -webkit-backdrop-filter: var(--blur);
     overflow: hidden;
-    transition: border-color 0.3s, box-shadow 0.3s;
+    margin-bottom: 32px;
 }
-.glass-card:hover {
-    border-color: rgba(99,102,241,0.3);
-    box-shadow: 0 0 30px rgba(99,102,241,0.06);
+.hero-wrap::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background:
+        radial-gradient(ellipse 80% 60% at -10% -10%, rgba(99,102,241,0.18) 0%, transparent 55%),
+        radial-gradient(ellipse 60% 40% at 110% 110%, rgba(6,182,212,0.12) 0%, transparent 50%);
+    pointer-events: none;
 }
-.glass-card::before {
+.hero-wrap::after {
     content: '';
     position: absolute;
     top: 0; left: 0; right: 0;
     height: 1px;
-    background: linear-gradient(90deg, transparent, rgba(99,102,241,0.3), transparent);
+    background: linear-gradient(90deg, transparent, rgba(192,193,255,0.5), rgba(76,215,246,0.5), transparent);
 }
 
-/* ── Score Ring ── */
-.score-ring-container { text-align: center; padding: 8px 0; }
-.score-ring {
+.hero-inner {
+    display: grid;
+    grid-template-columns: 1.55fr 1fr;
+    gap: 40px;
+    align-items: center;
     position: relative;
-    width: 110px;
-    height: 110px;
-    margin: 0 auto 8px;
 }
-.score-ring svg { transform: rotate(-90deg); }
-.score-ring-label {
+
+.hero-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 14px;
+    border-radius: var(--radius-pill);
+    border: 1px solid rgba(192,193,255,0.22);
+    background: rgba(128,131,255,0.10);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--primary);
+    margin-bottom: 20px;
+}
+.hero-badge::before {
+    content: '';
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--secondary);
+    box-shadow: 0 0 6px 2px rgba(76,215,246,0.6);
+    animation: pulse 2s ease-in-out infinite;
+}
+@keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%       { opacity: 0.5; transform: scale(0.8); }
+}
+
+.hero-title {
+    font-size: 4.2rem;
+    font-weight: 900;
+    letter-spacing: -0.05em;
+    line-height: 0.94;
+    margin-bottom: 18px;
+    background: linear-gradient(135deg, #e1e0ff 10%, #c0c1ff 40%, #4cd7f6 80%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.hero-sub {
+    font-size: 1.02rem;
+    color: var(--on-muted);
+    line-height: 1.75;
+    max-width: 580px;
+}
+
+/* Hero metric panel */
+.hero-metrics {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+}
+.hero-metric {
+    padding: 18px 20px;
+    border-radius: var(--radius-lg);
+    border: 1px solid rgba(192,193,255,0.08);
+    background: rgba(19,19,26,0.7);
+    transition: border-color 0.25s, transform 0.25s;
+}
+.hero-metric:hover {
+    border-color: rgba(192,193,255,0.22);
+    transform: translateY(-2px);
+}
+.hero-metric-label {
+    font-size: 0.67rem;
+    font-weight: 700;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--on-faint);
+    margin-bottom: 8px;
+}
+.hero-metric-val {
+    font-size: 1.06rem;
+    font-weight: 800;
+    color: var(--on-bg);
+    margin-bottom: 6px;
+}
+.hero-metric-note {
+    font-size: 0.78rem;
+    color: var(--on-muted);
+    line-height: 1.55;
+}
+
+/* ════════════════════════════════════════════════════════
+   SECTION HEADERS
+   ════════════════════════════════════════════════════════ */
+.section-hd {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin: 36px 0 20px;
+    position: relative;
+}
+.section-hd::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(90deg, var(--outline), transparent);
+    margin-left: 8px;
+}
+.section-hd-icon {
+    width: 40px; height: 40px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--outline);
+    background: rgba(27,27,35,0.9);
+    font-size: 1.05rem;
+    flex-shrink: 0;
+    box-shadow: 0 0 18px rgba(99,102,241,0.15);
+}
+.section-hd-text {
+    font-size: 1.18rem;
+    font-weight: 800;
+    color: var(--on-bg);
+    letter-spacing: -0.02em;
+}
+.section-hd-sub {
+    font-size: 0.82rem;
+    color: var(--on-faint);
+    margin-left: auto;
+}
+
+/* ════════════════════════════════════════════════════════
+   MODEL STATUS CARDS
+   ════════════════════════════════════════════════════════ */
+.model-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(172px, 1fr));
+    gap: 14px;
+    margin-bottom: 32px;
+}
+.model-card {
+    padding: 18px 16px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--outline);
+    background: var(--surf);
+    transition: border-color 0.25s, transform 0.25s, box-shadow 0.25s;
+    position: relative;
+    overflow: hidden;
+}
+.model-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.3), 0 0 20px var(--glow-ind);
+}
+.model-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; height: 2px;
+    border-radius: 2px 2px 0 0;
+}
+.model-card.model-custom::before  { background: linear-gradient(90deg, var(--primary-raw), var(--primary)); }
+.model-card.model-fallback::before { background: linear-gradient(90deg, var(--warning), #fbbf24); }
+.model-card.model-core::before    { background: linear-gradient(90deg, var(--success), #34d399); }
+
+.model-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: var(--radius-pill);
+    font-size: 0.64rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+}
+.pill-custom   { background: rgba(99,102,241,0.12); color: var(--primary); border: 1px solid rgba(99,102,241,0.25); }
+.pill-fallback { background: rgba(245,158,11,0.12); color: var(--warning); border: 1px solid rgba(245,158,11,0.25); }
+.pill-core     { background: rgba(16,185,129,0.12); color: var(--success); border: 1px solid rgba(16,185,129,0.25); }
+
+.model-label   { font-size: 0.68rem; font-weight: 700; letter-spacing: 0.10em; text-transform: uppercase; color: var(--on-faint); }
+.model-backend { font-size: 0.92rem; font-weight: 700; color: var(--on-bg); margin-bottom: 6px; line-height: 1.35; }
+.model-detail  { font-size: 0.78rem; color: var(--on-muted); line-height: 1.55; }
+
+/* ════════════════════════════════════════════════════════
+   FILE UPLOADER
+   ════════════════════════════════════════════════════════ */
+[data-testid="stFileUploader"] {
+    background: rgba(27,27,35,0.8) !important;
+    border: 2px dashed rgba(99,102,241,0.28) !important;
+    border-radius: var(--radius-xl) !important;
+    padding: 20px !important;
+    box-shadow: 0 0 40px rgba(99,102,241,0.08) !important;
+    transition: border-color 0.3s, box-shadow 0.3s !important;
+}
+[data-testid="stFileUploader"]:hover {
+    border-color: rgba(99,102,241,0.55) !important;
+    box-shadow: 0 0 60px rgba(99,102,241,0.15) !important;
+}
+[data-testid="stFileUploader"] section { padding: 0 !important; }
+[data-testid="stFileUploaderDropzone"] {
+    background: rgba(14,13,21,0.6) !important;
+    border: 1px solid rgba(192,193,255,0.08) !important;
+    border-radius: var(--radius-lg) !important;
+    min-height: 190px !important;
+    padding: 30px 24px !important;
+}
+[data-testid="stFileUploaderDropzoneInstructions"] p {
+    margin: 0 !important;
+    font-size: 1rem !important;
+    color: var(--on-muted) !important;
+    text-align: center !important;
+    line-height: 1.6 !important;
+}
+[data-testid="stFileUploader"] button {
+    min-width: 180px !important;
+    min-height: 48px !important;
+    border-radius: var(--radius-pill) !important;
+    background: linear-gradient(135deg, #8083ff, #03b5d3) !important;
+    color: #fff !important;
+    font-weight: 700 !important;
+    border: none !important;
+    box-shadow: 0 4px 20px rgba(99,102,241,0.35) !important;
+    transition: opacity 0.2s, transform 0.2s, box-shadow 0.2s !important;
+}
+[data-testid="stFileUploader"] button:hover {
+    opacity: 0.9 !important;
+    transform: translateY(-1px) !important;
+    box-shadow: 0 8px 30px rgba(99,102,241,0.45) !important;
+}
+[data-testid="stFileUploader"] button p { margin: 0 !important; white-space: nowrap !important; }
+
+/* ════════════════════════════════════════════════════════
+   CANDIDATE HEADER
+   ════════════════════════════════════════════════════════ */
+.cand-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 18px 24px;
+    border-radius: var(--radius-lg);
+    border: 1px solid rgba(128,131,255,0.22);
+    border-left: 3px solid;
+    border-image: linear-gradient(180deg, var(--primary-raw), var(--secondary-raw)) 1;
+    background: rgba(27,27,35,0.92);
+    margin: 36px 0 20px;
+    backdrop-filter: var(--blur);
+}
+.cand-icon { font-size: 1.6rem; }
+.cand-name  { font-size: 1.04rem; font-weight: 800; color: var(--on-bg); }
+.cand-file  { font-size: 0.82rem; color: var(--on-muted); margin-top: 2px; }
+
+/* ════════════════════════════════════════════════════════
+   SCORE RING PANEL
+   ════════════════════════════════════════════════════════ */
+.scores-panel {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 14px;
+    padding: 28px 24px;
+    border-radius: var(--radius-xl);
+    border: 1px solid var(--outline);
+    background: linear-gradient(180deg, var(--surf) 0%, var(--surf-mid) 100%);
+    position: relative;
+    overflow: hidden;
+    margin-bottom: 28px;
+}
+.scores-panel::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(192,193,255,0.35), rgba(76,215,246,0.35), transparent);
+}
+.score-col { text-align: center; }
+.score-ring-wrap {
+    position: relative;
+    width: 112px; height: 112px;
+    margin: 0 auto 10px;
+}
+.score-ring-wrap svg { transform: rotate(-90deg); }
+.score-ring-val {
     position: absolute;
     top: 50%; left: 50%;
     transform: translate(-50%, -50%);
-    font-size: 1.6rem;
-    font-weight: 800;
-    color: #e2e8f0;
+    font-size: 1.7rem;
+    font-weight: 900;
+    color: var(--on-bg);
+    letter-spacing: -0.04em;
 }
-.score-ring-caption {
-    font-size: 0.78rem;
-    color: #6b7280;
+.score-ring-cap {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.10em;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
-    font-weight: 600;
+    color: var(--on-faint);
 }
 
-/* ── Emotion Chip ── */
+/* ════════════════════════════════════════════════════════
+   EMOTION CHIP
+   ════════════════════════════════════════════════════════ */
 .emotion-chip {
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    padding: 10px 20px;
-    background: rgba(99,102,241,0.08);
-    border: 1px solid rgba(99,102,241,0.18);
-    border-radius: 999px;
-    margin-top: 8px;
+    padding: 9px 18px;
+    border-radius: var(--radius-pill);
+    background: rgba(128,131,255,0.12);
+    border: 1px solid rgba(128,131,255,0.22);
+    margin-top: 6px;
 }
-.emotion-chip-emoji { font-size: 1.5rem; }
-.emotion-chip-text {
-    font-size: 0.88rem;
-    font-weight: 600;
-    color: #c7d2fe;
-    text-transform: capitalize;
+.emotion-chip-text { font-size: 0.86rem; font-weight: 700; color: var(--primary); text-transform: capitalize; }
+.grade-display {
+    font-size: 2.4rem;
+    font-weight: 900;
+    letter-spacing: -0.04em;
+    margin-top: 12px;
+}
+.grade-label {
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--on-faint);
+    margin-top: 2px;
 }
 
-/* ── Q&A Cards ── */
-.qa-card {
-    background: rgba(17,19,35,0.5);
-    border: 1px solid rgba(99,102,241,0.1);
-    border-radius: 14px;
-    padding: 20px 24px;
-    margin: 12px 0;
-    transition: all 0.3s;
+/* ════════════════════════════════════════════════════════
+   SUMMARY GRID CARDS
+   ════════════════════════════════════════════════════════ */
+.summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 16px;
+    margin-bottom: 28px;
+}
+.glass-card {
+    padding: 22px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--outline);
+    background: var(--surf);
+    transition: border-color 0.25s, transform 0.25s;
+}
+.glass-card:hover {
+    border-color: rgba(192,193,255,0.18);
+    transform: translateY(-2px);
+}
+.card-title {
+    font-size: 0.92rem;
+    font-weight: 800;
+    color: var(--on-bg);
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.card-title-icon {
+    width: 26px; height: 26px;
+    border-radius: var(--radius-sm);
+    background: rgba(128,131,255,0.15);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.8rem;
+}
+
+.mini-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 9px 0;
+    border-bottom: 1px solid rgba(192,193,255,0.05);
+}
+.mini-row:last-child { border-bottom: none; }
+.mini-key { font-size: 0.76rem; color: var(--on-muted); font-weight: 500; }
+.mini-val { font-size: 0.9rem; font-weight: 800; color: var(--on-bg); }
+
+.insight-list {
+    margin: 0; padding-left: 0;
+    list-style: none;
+}
+.insight-list li {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 8px 0;
+    font-size: 0.83rem;
+    color: var(--on-muted);
+    line-height: 1.6;
+    border-bottom: 1px solid rgba(192,193,255,0.04);
+}
+.insight-list li:last-child { border-bottom: none; }
+.insight-list li::before {
+    content: '';
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    margin-top: 7px;
+}
+.insight-strength li::before { background: var(--success); box-shadow: 0 0 6px rgba(16,185,129,0.5); }
+.insight-concern  li::before { background: var(--warning);  box-shadow: 0 0 6px rgba(245,158,11,0.5); }
+
+/* ════════════════════════════════════════════════════════
+   METRIC BREAKDOWN GRID
+   ════════════════════════════════════════════════════════ */
+.metric-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+    gap: 14px;
+    margin-bottom: 28px;
+}
+.metric-card {
+    padding: 20px 16px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--outline);
+    background: var(--surf);
+    text-align: center;
+    transition: border-color 0.25s, transform 0.25s, box-shadow 0.25s;
+    position: relative;
+    overflow: hidden;
+}
+.metric-card:hover {
+    border-color: rgba(192,193,255,0.22);
+    transform: translateY(-3px);
+    box-shadow: 0 8px 30px rgba(0,0,0,0.3);
+}
+.metric-card::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 50% 0%, rgba(128,131,255,0.08) 0%, transparent 65%);
+    pointer-events: none;
+}
+.metric-lbl {
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--on-faint);
+    margin-bottom: 10px;
+}
+.metric-val {
+    font-size: 2rem;
+    font-weight: 900;
+    background: linear-gradient(135deg, var(--primary-dim), var(--secondary));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    letter-spacing: -0.04em;
+    line-height: 1;
+}
+
+/* ════════════════════════════════════════════════════════
+   EMOTION TIMELINE
+   ════════════════════════════════════════════════════════ */
+.timeline-wrap {
+    padding: 24px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--outline);
+    background: var(--surf);
+    margin-bottom: 28px;
+}
+.timeline-bars {
+    display: flex;
+    gap: 12px;
+    align-items: flex-end;
+    min-height: 100px;
+}
+.timeline-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+}
+.timeline-bar-outer {
+    width: 100%;
+    max-width: 44px;
+    border-radius: 6px 6px 2px 2px;
+    display: flex;
+    align-items: flex-end;
+    overflow: hidden;
+    transition: opacity 0.2s;
+}
+.timeline-bar-outer:hover { opacity: 0.8; }
+.timeline-bar-inner {
+    width: 100%;
+    border-radius: 6px 6px 2px 2px;
     position: relative;
 }
+.timeline-bar-inner::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, rgba(255,255,255,0.15), transparent);
+    border-radius: inherit;
+}
+.timeline-emo  { font-size: 0.68rem; color: var(--on-muted); font-weight: 600; letter-spacing: 0.04em; }
+.timeline-cnt  { font-size: 0.76rem; font-weight: 800; }
+
+/* ════════════════════════════════════════════════════════
+   QA CARDS
+   ════════════════════════════════════════════════════════ */
+.qa-card {
+    padding: 22px 26px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--outline);
+    background: var(--surf);
+    margin-bottom: 14px;
+    transition: border-color 0.25s, transform 0.25s;
+    position: relative;
+    overflow: hidden;
+}
 .qa-card:hover {
-    border-color: rgba(99,102,241,0.25);
-    transform: translateY(-1px);
-    box-shadow: 0 8px 30px rgba(0,0,0,0.15);
+    border-color: rgba(192,193,255,0.18);
+    transform: translateY(-2px);
+}
+.qa-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; width: 3px; height: 100%;
+    background: linear-gradient(180deg, var(--primary-raw), var(--secondary-raw));
+    border-radius: 0 0 0 var(--radius-lg);
 }
 .qa-question {
-    color: #e2e8f0;
-    font-weight: 600;
-    font-size: 0.95rem;
+    font-size: 0.94rem;
+    font-weight: 700;
+    color: var(--on-bg);
     margin-bottom: 10px;
     line-height: 1.5;
+    padding-left: 14px;
 }
-.qa-response-label {
-    font-size: 0.72rem;
+.qa-response-lbl {
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
-    letter-spacing: 0.1em;
-    color: #6b7280;
-    font-weight: 600;
-    margin-bottom: 4px;
+    color: var(--on-faint);
+    padding-left: 14px;
+    margin-bottom: 8px;
 }
 .qa-response {
-    color: #a5b4fc;
     font-style: italic;
-    font-size: 0.9rem;
-    line-height: 1.5;
-    padding: 10px 14px;
-    background: rgba(99,102,241,0.06);
-    border-radius: 8px;
-    border-left: 3px solid #6366f1;
-    margin-bottom: 12px;
+    font-size: 0.88rem;
+    color: var(--on-muted);
+    line-height: 1.65;
+    padding: 12px 16px;
+    background: rgba(14,13,21,0.5);
+    border-radius: var(--radius-md);
+    border-left: 2px solid rgba(99,102,241,0.4);
+    margin-left: 14px;
+    margin-bottom: 14px;
 }
 .qa-score-row {
     display: flex;
     align-items: center;
     gap: 12px;
+    padding-left: 14px;
 }
-.score-badge {
-    padding: 4px 16px;
-    border-radius: 999px;
-    font-weight: 700;
-    font-size: 0.82rem;
-}
-.badge-high  { background: rgba(52,211,153,0.12); color: #34d399; border: 1px solid rgba(52,211,153,0.2); }
-.badge-mid   { background: rgba(251,191,36,0.12); color: #fbbf24; border: 1px solid rgba(251,191,36,0.2); }
-.badge-low   { background: rgba(248,113,113,0.12); color: #f87171; border: 1px solid rgba(248,113,113,0.2); }
-.relevance-text {
-    font-size: 0.78rem;
-    color: #4b5563;
-}
-
-/* ── Section Headers ── */
-.section-header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin: 32px 0 16px;
-}
-.section-header-icon {
-    width: 36px; height: 36px;
-    display: flex; align-items: center; justify-content: center;
-    background: rgba(99,102,241,0.1);
-    border-radius: 10px;
-    font-size: 1.1rem;
-}
-.section-header-text {
-    font-size: 1.15rem;
-    font-weight: 700;
-    color: #e2e8f0;
-}
-
-/* ── Candidate Divider ── */
-.candidate-label {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 14px 20px;
-    background: linear-gradient(90deg, rgba(99,102,241,0.08), transparent);
-    border-left: 3px solid #6366f1;
-    border-radius: 0 12px 12px 0;
-    margin: 24px 0 16px;
-}
-.candidate-label-text {
-    font-size: 1.1rem;
-    font-weight: 700;
-    color: #e2e8f0;
-}
-.candidate-label-file {
-    font-size: 0.82rem;
-    color: #6b7280;
-    font-weight: 400;
-}
-
-/* ── Leaderboard ── */
-.lb-row {
-    display: flex;
-    align-items: center;
-    padding: 16px 20px;
-    background: rgba(17,19,35,0.5);
-    border: 1px solid rgba(99,102,241,0.08);
-    border-radius: 12px;
-    margin: 8px 0;
-    gap: 20px;
-    transition: all 0.25s;
-}
-.lb-row:hover {
-    border-color: rgba(99,102,241,0.2);
-    background: rgba(17,19,35,0.7);
-}
-.lb-rank {
-    font-size: 1.8rem;
-    width: 48px;
-    text-align: center;
-    flex-shrink: 0;
-}
-.lb-name {
-    flex: 1;
-    font-weight: 600;
-    color: #e2e8f0;
-    font-size: 0.95rem;
-}
-.lb-scores {
-    display: flex;
-    gap: 24px;
-}
-.lb-score-item {
-    text-align: center;
-}
-.lb-score-val {
-    font-size: 1.2rem;
+.score-pill {
+    padding: 5px 14px;
+    border-radius: var(--radius-pill);
+    font-size: 0.76rem;
     font-weight: 800;
-    color: #a5b4fc;
 }
-.lb-score-label {
-    font-size: 0.65rem;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    color: #4b5563;
-    font-weight: 600;
-}
+.pill-high { background: rgba(16,185,129,0.12);  color: #34d399; border: 1px solid rgba(16,185,129,0.25); }
+.pill-mid  { background: rgba(245,158,11,0.12);  color: #fbbf24; border: 1px solid rgba(245,158,11,0.25); }
+.pill-low  { background: rgba(239,68,68,0.10);   color: #f87171; border: 1px solid rgba(239,68,68,0.20); }
+.relevance-txt { font-size: 0.8rem; color: var(--on-faint); }
 
-/* ── Bar Chart ── */
+/* ════════════════════════════════════════════════════════
+   LEADERBOARD
+   ════════════════════════════════════════════════════════ */
+.lb-card {
+    padding: 18px 24px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--outline);
+    background: var(--surf);
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    transition: border-color 0.25s, transform 0.25s, box-shadow 0.25s;
+}
+.lb-card:hover {
+    border-color: rgba(192,193,255,0.22);
+    transform: translateY(-2px);
+    box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+}
+.lb-card.lb-first { border-color: rgba(128,131,255,0.35); background: rgba(128,131,255,0.07); }
+.lb-rank  { font-size: 1.9rem; width: 48px; text-align: center; flex-shrink: 0; }
+.lb-info  { flex: 1; min-width: 0; }
+.lb-name  { font-size: 0.94rem; font-weight: 800; color: var(--on-bg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lb-emo   { font-size: 0.78rem; color: var(--on-muted); margin-top: 3px; }
+.lb-scores { display: flex; gap: 28px; flex-shrink: 0; }
+.lb-score-col { text-align: right; min-width: 72px; }
+.lb-score-val { font-size: 1.5rem; font-weight: 900; letter-spacing: -0.04em; }
+.lb-score-lbl { font-size: 0.64rem; font-weight: 700; letter-spacing: 0.10em; text-transform: uppercase; color: var(--on-faint); }
 .bar-track {
-    width: 120px;
-    height: 6px;
-    background: rgba(99,102,241,0.1);
-    border-radius: 3px;
+    width: 100%;
+    height: 4px;
+    background: rgba(255,255,255,0.06);
+    border-radius: 99px;
     overflow: hidden;
-    margin-top: 4px;
+    margin-top: 6px;
 }
-.bar-fill {
-    height: 100%;
-    border-radius: 3px;
-    transition: width 0.5s ease;
-}
+.bar-fill { height: 100%; border-radius: 99px; transition: width 0.6s ease; }
 
-/* ── Empty State ── */
+/* ════════════════════════════════════════════════════════
+   EMPTY STATE
+   ════════════════════════════════════════════════════════ */
 .empty-state {
     text-align: center;
-    padding: 80px 20px;
+    padding: 100px 24px;
+    border-radius: var(--radius-xl);
+    border: 1px dashed rgba(99,102,241,0.22);
+    background: rgba(27,27,35,0.6);
+    position: relative;
+    overflow: hidden;
 }
-.empty-icon {
-    font-size: 4rem;
-    margin-bottom: 16px;
-    opacity: 0.7;
-    animation: float 3s ease-in-out infinite;
+.empty-state::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse 60% 50% at 50% 0%, rgba(99,102,241,0.10) 0%, transparent 65%);
 }
-@keyframes float {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-10px); }
-}
+.empty-icon { font-size: 4.5rem; line-height: 1; margin-bottom: 20px; opacity: 0.75; }
 .empty-title {
-    font-size: 1.3rem;
-    font-weight: 700;
-    color: #4b5563;
-    margin-bottom: 8px;
+    font-size: 1.55rem;
+    font-weight: 900;
+    color: var(--on-bg);
+    margin-bottom: 12px;
+    letter-spacing: -0.03em;
 }
-.empty-desc {
-    font-size: 0.9rem;
-    color: #374151;
-}
-
-/* ── Upload area ── */
-[data-testid="stFileUploader"] {
-    background: rgba(17,19,35,0.4);
-    border: 2px dashed rgba(99,102,241,0.2);
-    border-radius: 16px;
-    padding: 16px;
-    transition: border-color 0.3s;
-}
-[data-testid="stFileUploader"]:hover {
-    border-color: rgba(99,102,241,0.4);
+.empty-sub {
+    font-size: 0.94rem;
+    color: var(--on-muted);
+    max-width: 480px;
+    margin: 0 auto;
+    line-height: 1.7;
 }
 
-/* ── Expander ── */
+/* ════════════════════════════════════════════════════════
+   EXPANDER
+   ════════════════════════════════════════════════════════ */
 [data-testid="stExpander"] {
-    background: rgba(17,19,35,0.4);
-    border: 1px solid rgba(99,102,241,0.1);
-    border-radius: 12px;
+    background: var(--surf) !important;
+    border: 1px solid var(--outline) !important;
+    border-radius: var(--radius-lg) !important;
 }
 [data-testid="stExpander"] summary {
-    color: #9ca3af;
-    font-weight: 600;
+    color: var(--on-bg) !important;
+    font-weight: 700 !important;
 }
 
-/* ── Video ── */
+/* ════════════════════════════════════════════════════════
+   SPINNER & VIDEO
+   ════════════════════════════════════════════════════════ */
+[data-testid="stSpinner"] > div { color: var(--primary) !important; }
 [data-testid="stVideo"] {
-    border-radius: 12px;
+    border-radius: var(--radius-xl);
     overflow: hidden;
-    border: 1px solid rgba(99,102,241,0.12);
+    border: 1px solid var(--outline);
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
 }
 
-/* ── Spinner ── */
-[data-testid="stSpinner"] > div { color: #818cf8 !important; }
+/* ════════════════════════════════════════════════════════
+   DOWNLOAD BUTTON
+   ════════════════════════════════════════════════════════ */
+[data-testid="stDownloadButton"] button {
+    border-radius: var(--radius-pill) !important;
+    background: linear-gradient(135deg, #8083ff, #03b5d3) !important;
+    color: #fff !important;
+    font-weight: 700 !important;
+    border: none !important;
+    padding: 14px 28px !important;
+    box-shadow: 0 6px 24px rgba(99,102,241,0.35) !important;
+    transition: opacity 0.2s, transform 0.2s !important;
+}
+[data-testid="stDownloadButton"] button:hover {
+    opacity: 0.88 !important;
+    transform: translateY(-2px) !important;
+}
 
-/* ── Footer ── */
-.footer {
+/* ════════════════════════════════════════════════════════
+   FOOTER
+   ════════════════════════════════════════════════════════ */
+.app-footer {
     text-align: center;
-    padding: 40px 20px 24px;
-    color: #374151;
-    font-size: 0.78rem;
+    padding: 48px 24px 28px;
+    font-size: 0.75rem;
+    color: var(--on-faint);
+    border-top: 1px solid var(--outline);
+    margin-top: 40px;
 }
-.footer a { color: #6366f1; text-decoration: none; }
+.app-footer span { color: var(--primary-dim); }
+
+/* ════════════════════════════════════════════════════════
+   RESPONSIVE
+   ════════════════════════════════════════════════════════ */
+@media (max-width: 1024px) {
+    .hero-inner { grid-template-columns: 1fr; }
+    .scores-panel { grid-template-columns: repeat(3, 1fr); }
+}
+@media (max-width: 768px) {
+    .hero-title { font-size: 2.8rem; }
+    .hero-wrap { padding: 32px 28px 28px; }
+    .scores-panel { grid-template-columns: repeat(2, 1fr); }
+    .lb-scores { display: none; }
+    .hero-metrics { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 520px) {
+    .hero-title { font-size: 2.2rem; }
+    .hero-metrics, .metric-grid, .summary-grid { grid-template-columns: 1fr; }
+    .model-grid { grid-template-columns: 1fr 1fr; }
+    .scores-panel { grid-template-columns: 1fr 1fr; }
+}
 </style>
-""", unsafe_allow_html=True)
-
-# ─── Cached Model Loaders ────────────────────────────────────────────
-@st.cache_resource
-def load_sentence_model():
-    return SentenceTransformer('all-MiniLM-L6-v2')
-
-@st.cache_resource
-def load_whisper_model():
-    return whisper.load_model("base")
-
-sent_model = load_sentence_model()
-
-# ─── Q&A Reference Set ───────────────────────────────────────────────
-qa_set = {
-    "Could you elaborate on your core competencies and key skills?": (
-        "I have strong expertise in project management, stakeholder communication, "
-        "technical problem solving, and team leadership. My core competencies include "
-        "analytical thinking, attention to detail, and delivering results under pressure."
+"""
     ),
-    "What activities or responsibilities do you find most fulfilling in your work?": (
-        "I find the most fulfillment in mentoring team members, solving complex challenges, "
-        "and delivering high-impact projects. Working collaboratively and seeing the results "
-        "of our collective effort is very rewarding."
-    ),
-    "Could you provide an overview of your educational qualifications and professional experience?": (
-        "I hold a degree in my field and have several years of professional experience "
-        "working across various organizations. I have progressively taken on more responsibilities "
-        "and developed expertise in my domain."
-    ),
-    "Can you share some of your significant achievements and how they were accomplished?": (
-        "One of my key achievements was leading a project that significantly improved efficiency "
-        "or delivered measurable results. I accomplished this through careful planning, "
-        "cross-functional collaboration and clear communication."
-    ),
-    "What are your aspirations for the future, both professionally and personally?": (
-        "Professionally, I aspire to grow into a leadership role where I can make a broader impact. "
-        "Personally, I aim to continue learning, maintain a healthy work-life balance, "
-        "and contribute meaningfully to my field."
-    )
-}
-
-# ─── MediaPipe Setup ─────────────────────────────────────────────────
-import mediapipe.python.solutions.face_mesh as mp_face_mesh
-import mediapipe.python.solutions.pose as mp_pose
-face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True)
-pose_detector = mp_pose.Pose(static_image_mode=True)
-
-# Eye landmarks for custom gaze model
-_L_TOP, _L_BOT, _L_LEFT, _L_RIGHT = 159, 145, 33, 133
-_R_TOP, _R_BOT, _R_LEFT, _R_RIGHT = 386, 374, 362, 263
-_NOSE, _FACE_L, _FACE_R = 1, 234, 454
+    unsafe_allow_html=True,
+)
 
 
-def _gaze_features(landmarks):
-    """Extract 12-dim feature vector from face landmarks for gaze model."""
-    def ear(t, b, l, r):
-        return abs(landmarks[t].y - landmarks[b].y) / (abs(landmarks[l].x - landmarks[r].x) + 1e-6)
-    lx = (landmarks[_L_LEFT].x + landmarks[_L_RIGHT].x) / 2
-    ly = (landmarks[_L_TOP].y  + landmarks[_L_BOT].y)  / 2
-    rx = (landmarks[_R_LEFT].x + landmarks[_R_RIGHT].x) / 2
-    ry = (landmarks[_R_TOP].y  + landmarks[_R_BOT].y)  / 2
-    fw = abs(landmarks[_FACE_L].x - landmarks[_FACE_R].x)
-    gh = (landmarks[_NOSE].x - landmarks[_FACE_L].x) / (fw + 1e-6) - 0.5
-    gv = landmarks[_NOSE].y - landmarks[4].y
-    es = abs(ly - ry)
-    return [ear(_L_TOP,_L_BOT,_L_LEFT,_L_RIGHT), ear(_R_TOP,_R_BOT,_R_LEFT,_R_RIGHT),
-            lx, ly, rx, ry, landmarks[_NOSE].x, landmarks[_NOSE].y, fw, gh, gv, es]
+# ─── HELPERS ──────────────────────────────────────────────────────────────────
 
-
-def _predict_gaze(landmarks, gaze_model):
-    """Returns (blink: bool, gaze_forward: bool) using custom model or fallback."""
-    if gaze_model is not None:
-        feats = np.array([_gaze_features(landmarks)])
-        pred = gaze_model.predict(feats)[0]  # [blink, gaze]
-        return bool(pred[0]), bool(pred[1])
-    # Fallback: geometric thresholds
-    blink = abs(landmarks[_L_TOP].y - landmarks[_L_BOT].y) < 0.015
-    gaze_forward = abs(landmarks[33].x - landmarks[263].x) > 0.18
-    return blink, gaze_forward
-
-
-def _predict_emotion_custom(frame_rgb, emotion_model):
-    """Predict emotion using custom CNN. Returns emotion string."""
-    try:
-        import tensorflow as tf
-        gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
-        gray = cv2.resize(gray, (48, 48))
-        inp  = gray.astype("float32") / 255.0
-        inp  = inp.reshape(1, 48, 48, 1)
-        probs = emotion_model.predict(inp, verbose=0)[0]
-        return _EMOTION_LABELS[int(np.argmax(probs))]
-    except Exception:
-        return None
-
-
-def _predict_voice_confidence(y_audio, sr, voice_model):
-    """Predict voice confidence score using custom regressor."""
-    try:
-        mfcc = librosa.feature.mfcc(y=y_audio, sr=sr, n_mfcc=40)
-        mfcc_mean = np.mean(mfcc, axis=1)
-        rms       = np.mean(librosa.feature.rms(y=y_audio))
-        centroid  = np.mean(librosa.feature.spectral_centroid(y=y_audio, sr=sr))
-        zcr       = np.mean(librosa.feature.zero_crossing_rate(y=y_audio))
-        onset_env = librosa.onset.onset_strength(y=y_audio, sr=sr)
-        tempo     = librosa.beat.tempo(onset_envelope=onset_env, sr=sr)[0]
-        pitch     = librosa.yin(y_audio, fmin=50, fmax=400)
-        pitch_std = np.std(pitch[pitch > 0]) if np.any(pitch > 0) else 0.0
-        feats = np.concatenate([mfcc_mean, [rms, centroid, zcr, tempo, pitch_std]]).reshape(1, -1)
-        score = float(voice_model.predict(feats)[0])
-        return max(0.0, min(10.0, score))
-    except Exception:
-        return None
-
-
-# ─── Analysis Functions ──────────────────────────────────────────────
-def evaluate_technical_answers(transcript, qa_set):
-    sentences = [s.strip() for s in re.split(r'[.!?,]', transcript.lower()) if len(s.strip()) > 8]
-    if not sentences:
-        sentences = [transcript.lower()]
-
-    questions = list(qa_set.keys())
-    expected_answers = list(qa_set.values())
-
-    sent_embeddings = sent_model.encode(sentences, convert_to_tensor=True)
-    q_embeddings = sent_model.encode(questions, convert_to_tensor=True)
-    exp_embeddings = sent_model.encode(expected_answers, convert_to_tensor=True)
-
-    sim_matrix = util.cos_sim(q_embeddings, sent_embeddings).cpu().numpy()
-
-    assigned = {}
-    used_indices = set()
-    order = sorted(range(len(questions)), key=lambda qi: sim_matrix[qi].max(), reverse=True)
-    for qi in order:
-        ranked = sim_matrix[qi].argsort()[::-1]
-        for si in ranked:
-            if si not in used_indices:
-                assigned[qi] = int(si)
-                used_indices.add(si)
-                break
-        else:
-            assigned[qi] = int(sim_matrix[qi].argmax())
-
-    results = []
-    total_score = 0
-
-    for qi, question in enumerate(questions):
-        si = assigned[qi]
-        best_sentence = sentences[si]
-
-        best_emb = sent_model.encode(best_sentence, convert_to_tensor=True)
-        raw_sim = util.cos_sim(best_emb, exp_embeddings[qi]).item()
-        q_relevance = float(sim_matrix[qi][si])
-
-        combined = 0.6 * raw_sim + 0.4 * q_relevance
-        score = round(combined * 10, 2)
-        total_score += score
-
-        results.append({
-            "Question": question,
-            "Best Match from Response": best_sentence,
-            "Score": score,
-            "Relevance": round(q_relevance * 10, 2),
-        })
-
-    average_score = round(total_score / len(qa_set), 2) if qa_set else 0.0
-    return results, average_score
-
-
-def extract_audio(video_path, audio_path="temp_audio.wav"):
-    command = f'ffmpeg -y -i "{video_path}" -vn -acodec pcm_s16le -ar 44100 -ac 1 "{audio_path}"'
-    subprocess.call(command, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return audio_path
-
-
-def transcribe_and_analyze_fluency(audio_path):
-    whisper_model = load_whisper_model()
-    result = whisper_model.transcribe(audio_path)
-    transcript = result["text"].strip()
-
-    filler_words = ["um", "uh", "like", "you know", "i mean", "so", "actually", "basically", "right", "okay"]
-    transcript_lower = transcript.lower()
-    total_words = len(transcript_lower.split())
-    filler_count = sum(len(re.findall(rf"\b{re.escape(fw)}\b", transcript_lower)) for fw in filler_words)
-
-    if total_words == 0:
-        return transcript, 0.0
-
-    filler_ratio = filler_count / total_words
-    fluency_score = max(0, 10 - (filler_ratio * 50))
-    return transcript, round(fluency_score, 2)
-
-
-def detect_blink(landmarks):
-    return abs(landmarks[159].y - landmarks[145].y) < 0.015
-
-
-def detect_head_movement(prev_positions, current_nose):
-    prev_positions.append(current_nose)
-    if len(prev_positions) > 10:
-        prev_positions.popleft()
-    diffs = [abs(prev_positions[i] - prev_positions[i-1]) for i in range(1, len(prev_positions))]
-    return np.mean(diffs) if diffs else 0.0
-
-
-def analyze_voice_confidence(audio_path):
-    y, sr = librosa.load(audio_path)
-    pitch = librosa.yin(y, fmin=50, fmax=300)
-    volume = np.mean(np.abs(y))
-    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
-    speech_rate = librosa.beat.tempo(onset_envelope=onset_env, sr=sr)[0]
-
-    score = 0
-    if 130 < speech_rate < 180:
-        score += 3
-    if volume > 0.02:
-        score += 3
-    if np.std(pitch) > 8:
-        score += 4
-    return round(score, 2)
-
-
-def is_facing_forward(landmarks):
-    return abs(landmarks[33].x - landmarks[263].x) > 0.18
-
-
-def detect_posture(frame):
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    result = pose_detector.process(rgb)
-    if result.pose_landmarks:
-        ls = result.pose_landmarks.landmark[mp_pose.PoseLandmark.LEFT_SHOULDER]
-        rs = result.pose_landmarks.landmark[mp_pose.PoseLandmark.RIGHT_SHOULDER]
-        nose = result.pose_landmarks.landmark[mp_pose.PoseLandmark.NOSE]
-        shoulder_diff = abs(ls.y - rs.y)
-        head_level = nose.y < ls.y
-        return 1 if (shoulder_diff < 0.07 and head_level) else 0
-    return 0.5
-
-
-def analyze_confidence(video_path):
-    # Load custom trained models (returns None if not yet trained)
-    emotion_model = load_custom_emotion_model()
-    gaze_model    = load_custom_gaze_model()
-    voice_model   = load_custom_voice_model()
-
-    cap = cv2.VideoCapture(video_path)
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    interval = max(frame_count // 30, 1)
-
-    blink_count = 0
-    total_blink_frames = 0
-    head_positions = deque()
-    head_movement_values = []
-    expression_scores = []
-    gaze_scores = []
-    posture_scores = []
-    emotion_timeline = []  # NEW
-
-    expr_score_map = {"happy": 10, "neutral": 7, "surprise": 5, "sad": 3, "angry": 2, "fear": 2, "disgust": 1}
-
-    for i in range(0, frame_count, interval):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-        ret, frame = cap.read()
-        if not ret:
-            continue
-
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-        # Custom CNN first, DeepFace fallback
-        emotion = None
-        if emotion_model is not None:
-            emotion = _predict_emotion_custom(rgb, emotion_model)
-        if emotion is None:
-            try:
-                analysis = DeepFace.analyze(rgb, actions=["emotion"], enforce_detection=False, silent=True)
-                emotion = analysis[0]["dominant_emotion"]
-            except Exception:
-                emotion = "neutral"
-
-        expression_scores.append(expr_score_map.get(emotion, 5))
-        emotion_timeline.append(emotion)
-
-        results = face_mesh.process(rgb)
-        if results.multi_face_landmarks:
-            face_lm = results.multi_face_landmarks[0]
-            is_blink, is_forward = _predict_gaze(face_lm.landmark, gaze_model)
-            if is_blink:
-                blink_count += 1
-            total_blink_frames += 1
-            nose_x = face_lm.landmark[1].x
-            head_movement_values.append(detect_head_movement(head_positions, nose_x))
-            gaze_scores.append(1 if is_forward else 0)
-
-        posture_scores.append(detect_posture(frame))
-
-    cap.release()
-
-    if not expression_scores:
-        return "neutral", 0.0, "", [], 0.0
-
-    avg_expression = np.mean(expression_scores)
-    eye_contact_pct = round(np.mean(gaze_scores) * 100, 1) if gaze_scores else 0.0
-    avg_gaze = eye_contact_pct / 100.0
-    avg_posture = np.mean(posture_scores)
-    avg_blink_rate = blink_count / total_blink_frames if total_blink_frames > 0 else 0
-    blink_score = max(0, min(10 - (avg_blink_rate * 100), 10))
-
-    avg_head_movement = np.mean(head_movement_values) if head_movement_values else 0.05
-    head_score = max(0, min(10 - (avg_head_movement * 100), 10))
-
-    audio_path = extract_audio(video_path)
-    transcript, fluency_score = transcribe_and_analyze_fluency(audio_path)
-
-    # Custom voice regressor or Librosa heuristic fallback
-    if voice_model is not None:
-        y_audio, sr_audio = librosa.load(audio_path)
-        voice_score = _predict_voice_confidence(y_audio, sr_audio, voice_model) or 0.0
-    else:
-        voice_score = analyze_voice_confidence(audio_path)
-
-    confidence_score = round(
-        0.25 * avg_expression +
-        0.20 * avg_gaze * 10 +
-        0.20 * voice_score +
-        0.15 * fluency_score +
-        0.10 * avg_posture * 10 +
-        0.05 * blink_score +
-        0.05 * head_score, 2
-    )
-    confidence_score = min(confidence_score, 10.0)
-    dominant_emotion = max(set(emotion_timeline), key=emotion_timeline.count) if emotion_timeline else "neutral"
-    return dominant_emotion, confidence_score, transcript, emotion_timeline, eye_contact_pct
-
-
-# ─── Helper Functions ─────────────────────────────────────────────────
-def score_badge_class(score):
+def score_pill_class(score: float) -> str:
     if score >= 7:
-        return "badge-high"
-    elif score >= 4:
-        return "badge-mid"
-    return "badge-low"
+        return "pill-high"
+    if score >= 4:
+        return "pill-mid"
+    return "pill-low"
 
 
-def score_color(score):
+def score_color(score: float) -> str:
     if score >= 7:
         return "#34d399"
-    elif score >= 4:
+    if score >= 4:
         return "#fbbf24"
     return "#f87171"
 
 
-def emotion_emoji(emotion):
-    return {"happy": "😄", "neutral": "😐", "sad": "😢", "angry": "😠",
-            "fear": "😨", "surprise": "😲", "disgust": "🤢"}.get(emotion, "😐")
+def emotion_emoji(emotion: str) -> str:
+    return {
+        "happy":   "😄",
+        "neutral": "😐",
+        "sad":     "😢",
+        "angry":   "😠",
+        "fear":    "😨",
+        "surprise":"😲",
+        "disgust": "🤢",
+    }.get(emotion, "😐")
 
 
-def render_score_ring(score, label, max_val=10):
-    """SVG circular score gauge."""
-    pct = min(score / max_val, 1.0)
-    radius = 42
-    circumference = 2 * 3.14159 * radius
-    offset = circumference * (1 - pct)
-    color = score_color(score)
-
-    return f"""
-    <div class='score-ring-container'>
-        <div class='score-ring'>
-            <svg width='110' height='110' viewBox='0 0 110 110'>
-                <circle cx='55' cy='55' r='{radius}' fill='none'
-                    stroke='rgba(99,102,241,0.1)' stroke-width='8'/>
-                <circle cx='55' cy='55' r='{radius}' fill='none'
-                    stroke='{color}' stroke-width='8'
-                    stroke-dasharray='{circumference}'
-                    stroke-dashoffset='{offset}'
-                    stroke-linecap='round'
-                    style='transition: stroke-dashoffset 1s ease;'/>
-            </svg>
-            <div class='score-ring-label'>{score}</div>
-        </div>
-        <div class='score-ring-caption'>{label}</div>
-    </div>
-    """
-
-
-def rank_medal(rank):
+def rank_medal(rank: int) -> str:
     return {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"#{rank}")
 
 
-# ─── UI ───────────────────────────────────────────────────────────────
+def render_score_ring(score: float, label: str, max_val: float = 10) -> str:
+    pct = min(score / max_val, 1.0)
+    radius = 44
+    circ = 2 * 3.14159265 * radius
+    offset = circ * (1 - pct)
+    color = score_color(score)
+    return html_block(
+        f"""
+        <div class='score-col'>
+            <div class='score-ring-wrap'>
+                <svg width='112' height='112' viewBox='0 0 112 112'>
+                    <defs>
+                        <filter id='glow-{int(score*100)}'>
+                            <feGaussianBlur stdDeviation='3' result='coloredBlur'/>
+                            <feMerge><feMergeNode in='coloredBlur'/><feMergeNode in='SourceGraphic'/></feMerge>
+                        </filter>
+                    </defs>
+                    <circle cx='56' cy='56' r='{radius}' fill='none'
+                        stroke='rgba(255,255,255,0.05)' stroke-width='8'/>
+                    <circle cx='56' cy='56' r='{radius}' fill='none'
+                        stroke='{color}' stroke-width='8'
+                        stroke-dasharray='{circ}'
+                        stroke-dashoffset='{offset}'
+                        stroke-linecap='round'
+                        filter='url(#glow-{int(score*100)})'
+                        style='transition: stroke-dashoffset 1.2s cubic-bezier(0.4,0,0.2,1);'/>
+                </svg>
+                <div class='score-ring-val'>{score}</div>
+            </div>
+            <div class='score-ring-cap'>{label}</div>
+        </div>
+        """
+    )
 
-# Hero Section
-st.markdown("""
-<div class='hero-container'>
-    <div class='hero-badge'>AI-Powered Analysis</div>
-    <div class='hero-title'>InterviewIQ</div>
-    <div class='hero-subtitle'>
-        Upload interview recordings and get instant AI analysis of confidence,
-        body language, voice quality, and answer relevance.
-    </div>
-</div>
-""", unsafe_allow_html=True)
 
-# Upload Area
-uploaded_videos = st.file_uploader(
-    "📁 Drop interview videos here",
-    type=["mp4", "webm", "mov"],
-    accept_multiple_files=True,
-    help="Supports MP4, WebM, MOV · Multiple files for candidate comparison"
+def render_model_cards() -> str:
+    cards = []
+    for st_obj in get_app_model_statuses():
+        if "Fallback" in st_obj.active_backend or "Heuristic" in st_obj.active_backend:
+            card_cls, pill_cls, pill_text = "model-fallback", "pill-fallback", "Fallback"
+        elif "Custom" in st_obj.active_backend or "Random Forest" in st_obj.active_backend:
+            card_cls, pill_cls, pill_text = "model-custom", "pill-custom", "Custom"
+        else:
+            card_cls, pill_cls, pill_text = "model-core", "pill-core", "Core"
+        cards.append(
+            html_block(
+                f"""
+                <div class='model-card {card_cls}'>
+                    <div class='model-pill {pill_cls}'>{pill_text}</div>
+                    <div class='model-label'>{st_obj.label}</div>
+                    <div class='model-backend'>{st_obj.active_backend}</div>
+                    <div class='model-detail'>{st_obj.detail}</div>
+                </div>
+                """
+            )
+        )
+    return "<div class='model-grid'>" + "".join(cards) + "</div>"
+
+
+def render_breakdown_grid(breakdown: dict) -> str:
+    labels = {
+        "expression":  "Expression",
+        "eye_contact":  "Eye Contact",
+        "voice":        "Voice",
+        "fluency":      "Fluency",
+        "posture":      "Posture",
+        "blink":        "Blink",
+        "head":         "Head",
+    }
+    cards = []
+    for key, value in breakdown.items():
+        cards.append(
+            html_block(
+                f"""
+                <div class='metric-card'>
+                    <div class='metric-lbl'>{labels.get(key, key.title())}</div>
+                    <div class='metric-val'>{value}</div>
+                </div>
+                """
+            )
+        )
+    return "<div class='metric-grid'>" + "".join(cards) + "</div>"
+
+
+def render_insight_card(title: str, items: list, kind: str = "strength", icon: str = "✨") -> str:
+    li_html = "".join(f"<li>{item}</li>" for item in items)
+    return html_block(
+        f"""
+        <div class='glass-card'>
+            <div class='card-title'>
+                <div class='card-title-icon'>{icon}</div>
+                {title}
+            </div>
+            <ul class='insight-list insight-{kind}'>{li_html}</ul>
+        </div>
+        """
+    )
+
+
+def render_snapshot_card(analysis: CandidateAnalysis) -> str:
+    words = len(analysis.transcript.split())
+    return html_block(
+        f"""
+        <div class='glass-card'>
+            <div class='card-title'>
+                <div class='card-title-icon'>📋</div>
+                Review Snapshot
+            </div>
+            <div class='mini-row'>
+                <span class='mini-key'>Overall Grade</span>
+                <span class='mini-val' style='color:{analysis.grade_color}'>{analysis.grade}</span>
+            </div>
+            <div class='mini-row'>
+                <span class='mini-key'>Duration</span>
+                <span class='mini-val'>{analysis.video_duration_s:.1f}s</span>
+            </div>
+            <div class='mini-row'>
+                <span class='mini-key'>Sampled Frames</span>
+                <span class='mini-val'>{analysis.sampled_frames}</span>
+            </div>
+            <div class='mini-row'>
+                <span class='mini-key'>Transcript Words</span>
+                <span class='mini-val'>{words}</span>
+            </div>
+            <div class='mini-row'>
+                <span class='mini-key'>Eye Contact</span>
+                <span class='mini-val'>{analysis.eye_contact_pct:.0f}%</span>
+            </div>
+        </div>
+        """
+    )
+
+
+def render_emotion_timeline(emotion_timeline: list) -> str:
+    if not emotion_timeline:
+        return "<div style='color:var(--on-muted);font-size:0.88rem;'>No emotion timeline data.</div>"
+
+    order = ["happy", "neutral", "surprise", "sad", "angry", "fear", "disgust"]
+    color_map = {
+        "happy":   "#34d399",
+        "neutral": "#818cf8",
+        "surprise":"#fbbf24",
+        "sad":     "#60a5fa",
+        "angry":   "#f87171",
+        "fear":    "#c084fc",
+        "disgust": "#a3e635",
+    }
+    counts = pd.Series(emotion_timeline).value_counts().reindex(order, fill_value=0)
+    max_c = max(counts.values) + 1
+    bars = []
+    for emotion, count in counts.items():
+        if count == 0:
+            continue
+        height = int((count / max_c) * 90)
+        color = color_map.get(emotion, "#818cf8")
+        bars.append(
+            html_block(
+                f"""
+                <div class='timeline-col'>
+                    <div class='timeline-bar-outer' style='height:{height}px;background:rgba(255,255,255,0.04);'>
+                        <div class='timeline-bar-inner' style='height:{height}px;background:{color};'></div>
+                    </div>
+                    <div class='timeline-cnt' style='color:{color};'>{count}</div>
+                    <div class='timeline-emo'>{emotion[:3]}</div>
+                </div>
+                """
+            )
+        )
+    return "<div class='timeline-bars'>" + "".join(bars) + "</div>"
+
+
+# ─── CACHED ANALYSIS ──────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def analyze_uploaded_video(video_bytes: bytes, filename: str) -> dict:
+    suffix = os.path.splitext(filename)[1] or ".mp4"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(video_bytes)
+        video_path = tmp.name
+    try:
+        return analyze_video(video_path, qa_set).to_dict()
+    finally:
+        if os.path.exists(video_path):
+            os.remove(video_path)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# HERO SECTION
+# ════════════════════════════════════════════════════════════════════════════════
+st.markdown(
+    html_block(
+        """
+        <div class='hero-wrap'>
+            <div class='hero-badge'>Interview Intelligence Platform</div>
+            <div class='hero-inner'>
+                <div class='hero-copy'>
+                    <div class='hero-title'>InterviewIQ</div>
+                    <div class='hero-sub'>
+                        AI-powered interview analysis transforming candidate sessions into structured,
+                        actionable intelligence — behavioral signals, vocal patterns, gaze tracking,
+                        and semantic answer evaluation in one unified workspace.
+                    </div>
+                </div>
+                <div class='hero-metrics'>
+                    <div class='hero-metric'>
+                        <div class='hero-metric-label'>Platform Coverage</div>
+                        <div class='hero-metric-val'>Video · Audio · Answers</div>
+                        <div class='hero-metric-note'>Unified pipeline for nonverbal, vocal, and semantic analysis.</div>
+                    </div>
+                    <div class='hero-metric'>
+                        <div class='hero-metric-label'>Analysis Output</div>
+                        <div class='hero-metric-val'>Structured Review</div>
+                        <div class='hero-metric-note'>Scored summaries, signal breakdowns, and exportable reports.</div>
+                    </div>
+                    <div class='hero-metric'>
+                        <div class='hero-metric-label'>Model Stack</div>
+                        <div class='hero-metric-val'>Custom + Pretrained</div>
+                        <div class='hero-metric-note'>Trained CNN, MLP, Random Forest alongside Whisper & MediaPipe.</div>
+                    </div>
+                    <div class='hero-metric'>
+                        <div class='hero-metric-label'>Use Case</div>
+                        <div class='hero-metric-val'>Recruiting Review</div>
+                        <div class='hero-metric-note'>Faster screening, comparison, and structured candidate ranking.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        """
+    ),
+    unsafe_allow_html=True,
 )
 
-leaderboard = []
+# ════════════════════════════════════════════════════════════════════════════════
+# MODEL STACK
+# ════════════════════════════════════════════════════════════════════════════════
+st.markdown(
+    html_block(
+        """
+        <div class='section-hd'>
+            <div class='section-hd-icon'>🧩</div>
+            <div class='section-hd-text'>Model Stack</div>
+            <div class='section-hd-sub'>Active inference backends</div>
+        </div>
+        """
+    ),
+    unsafe_allow_html=True,
+)
+st.markdown(render_model_cards(), unsafe_allow_html=True)
 
+# ════════════════════════════════════════════════════════════════════════════════
+# UPLOAD
+# ════════════════════════════════════════════════════════════════════════════════
+st.markdown(
+    html_block(
+        """
+        <div class='section-hd'>
+            <div class='section-hd-icon'>📤</div>
+            <div class='section-hd-text'>Upload Interviews</div>
+        </div>
+        """
+    ),
+    unsafe_allow_html=True,
+)
+
+uploaded_videos = st.file_uploader(
+    "Drop interview videos here",
+    type=["mp4", "webm", "mov"],
+    accept_multiple_files=True,
+    help="Upload one or more interview clips. Cached analysis keeps reruns much faster.",
+)
+
+leaderboard: list[dict] = []
+report_payload: list[dict] = []
+
+# ════════════════════════════════════════════════════════════════════════════════
+# CANDIDATE ANALYSIS LOOP
+# ════════════════════════════════════════════════════════════════════════════════
 if uploaded_videos:
-    for i, video in enumerate(uploaded_videos):
-        # Candidate Header
-        st.markdown(f"""
-        <div class='candidate-label'>
-            <span style='font-size:1.4rem'>🎬</span>
-            <div>
-                <div class='candidate-label-text'>Candidate {i+1}</div>
-                <div class='candidate-label-file'>{video.name}</div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        ext = os.path.splitext(video.name)[1]
-        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-            tmp.write(video.read())
-            video_path = tmp.name
-
-        col_vid, col_space = st.columns([2, 1])
-        with col_vid:
-            st.video(video_path)
-
-        with st.spinner(f"🔍 Analyzing Candidate {i+1} — this may take a minute..."):
-            dominant_emotion, conf_score, transcript, emotion_timeline, eye_contact_pct = analyze_confidence(video_path)
-            qa_results, tech_score = evaluate_technical_answers(transcript, qa_set)
-            total_score = round((conf_score + tech_score) / 2, 2)
-
-        # ── Grade Computation ──
-        def compute_grade(score):
-            if score >= 8.5: return "A+", "#34d399"
-            if score >= 7.5: return "A", "#34d399"
-            if score >= 6.5: return "B+", "#818cf8"
-            if score >= 5.5: return "B", "#818cf8"
-            if score >= 4.5: return "C", "#fbbf24"
-            if score >= 3.5: return "D", "#fb923c"
-            return "F", "#f87171"
-        grade, grade_color = compute_grade(total_score)
-
-        # ── Score Rings ──
-        st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-        c1, c2, c3, c4, c5 = st.columns(5)
-        with c1:
-            st.markdown(render_score_ring(conf_score, "Confidence"), unsafe_allow_html=True)
-        with c2:
-            st.markdown(render_score_ring(tech_score, "Technical"), unsafe_allow_html=True)
-        with c3:
-            st.markdown(render_score_ring(total_score, "Overall"), unsafe_allow_html=True)
-        with c4:
-            st.markdown(render_score_ring(round(eye_contact_pct / 10, 1), "Eye Contact"), unsafe_allow_html=True)
-        with c5:
-            emoji = emotion_emoji(dominant_emotion)
-            st.markdown(f"""
-            <div style='text-align:center; padding: 8px 0;'>
-                <div class='emotion-chip'>
-                    <span class='emotion-chip-emoji'>{emoji}</span>
-                    <span class='emotion-chip-text'>{dominant_emotion}</span>
-                </div>
-                <div class='score-ring-caption' style='margin-top:8px'>Dominant Emotion</div>
-                <div style='margin-top:10px;'>
-                    <span style='font-size:2rem; font-weight:900; color:{grade_color};'>{grade}</span>
-                    <div class='score-ring-caption'>Grade</div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        # ── Emotion Timeline ──
-        if emotion_timeline:
-            st.markdown("""
-            <div class='section-header'>
-                <div class='section-header-icon'>📊</div>
-                <div class='section-header-text'>Emotion Timeline</div>
-            </div>
-            """, unsafe_allow_html=True)
-            emotion_order = ["happy", "neutral", "surprise", "sad", "angry", "fear", "disgust"]
-            emotion_color_map = {"happy": "#34d399", "neutral": "#818cf8", "surprise": "#fbbf24",
-                                  "sad": "#60a5fa", "angry": "#f87171", "fear": "#c084fc", "disgust": "#a3e635"}
-            timeline_df = pd.DataFrame({"Frame": range(len(emotion_timeline)), "Emotion": emotion_timeline})
-            counts = timeline_df["Emotion"].value_counts().reindex(emotion_order, fill_value=0)
-            bar_html = "<div style='display:flex; gap:8px; align-items:flex-end; height:80px; padding: 8px 0;'>"
-            max_count = max(counts.values) + 1
-            for em, ct in counts.items():
-                if ct == 0: continue
-                h = int((ct / max_count) * 70)
-                c = emotion_color_map.get(em, "#818cf8")
-                bar_html += f"<div style='display:flex;flex-direction:column;align-items:center;gap:3px;'><div style='width:36px;height:{h}px;background:{c};border-radius:4px 4px 0 0;opacity:0.85;'></div><div style='font-size:0.6rem;color:#9ca3af;'>{em[:3]}</div><div style='font-size:0.65rem;font-weight:700;color:{c};'>{ct}</div></div>"
-            bar_html += "</div>"
-            st.markdown(f"<div class='glass-card'>{bar_html}</div>", unsafe_allow_html=True)
-
-        # ── Transcript ──
-        with st.expander("📄 View Full Transcript"):
-            st.write(transcript if transcript.strip() else "_No speech detected in video._")
-
-        # ── Q&A Evaluation ──
-        st.markdown("""
-        <div class='section-header'>
-            <div class='section-header-icon'>🧠</div>
-            <div class='section-header-text'>Answer Evaluation</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        for res in qa_results:
-            sc = res["Score"]
-            rel = res["Relevance"]
-            badge = score_badge_class(sc)
-            st.markdown(f"""
-            <div class='qa-card'>
-                <div class='qa-question'>❓ {res['Question']}</div>
-                <div class='qa-response-label'>Candidate's Response</div>
-                <div class='qa-response'>"{res['Best Match from Response']}"</div>
-                <div class='qa-score-row'>
-                    <span class='score-badge {badge}'>{sc}/10</span>
-                    <span class='relevance-text'>Relevance: {rel}/10</span>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        leaderboard.append({
-            "name": video.name,
-            "emotion": dominant_emotion,
-            "confidence": conf_score,
-            "technical": tech_score,
-            "total": total_score
-        })
-
-        st.divider()
-
-    # ── Leaderboard ──
-    if len(leaderboard) > 0:
-        st.markdown("""
-        <div class='section-header' style='margin-top:40px'>
-            <div class='section-header-icon'>🏆</div>
-            <div class='section-header-text'>Candidate Leaderboard</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        sorted_lb = sorted(leaderboard, key=lambda x: x["total"], reverse=True)
-
-        for rank, entry in enumerate(sorted_lb, 1):
-            medal = rank_medal(rank)
-            conf_pct = entry["confidence"] / 10 * 100
-            tech_pct = entry["technical"] / 10 * 100
-            tot_pct = entry["total"] / 10 * 100
-            conf_clr = score_color(entry["confidence"])
-            tech_clr = score_color(entry["technical"])
-            tot_clr = score_color(entry["total"])
-            emoji = emotion_emoji(entry["emotion"])
-
-            st.markdown(f"""
-            <div class='lb-row'>
-                <div class='lb-rank'>{medal}</div>
-                <div class='lb-name'>{emoji} {entry["name"]}</div>
-                <div class='lb-scores'>
-                    <div class='lb-score-item'>
-                        <div class='lb-score-val' style='color:{conf_clr}'>{entry["confidence"]}</div>
-                        <div class='lb-score-label'>Confidence</div>
-                        <div class='bar-track'><div class='bar-fill' style='width:{conf_pct}%;background:{conf_clr}'></div></div>
-                    </div>
-                    <div class='lb-score-item'>
-                        <div class='lb-score-val' style='color:{tech_clr}'>{entry["technical"]}</div>
-                        <div class='lb-score-label'>Technical</div>
-                        <div class='bar-track'><div class='bar-fill' style='width:{tech_pct}%;background:{tech_clr}'></div></div>
-                    </div>
-                    <div class='lb-score-item'>
-                        <div class='lb-score-val' style='color:{tot_clr}'>{entry["total"]}</div>
-                        <div class='lb-score-label'>Total</div>
-                        <div class='bar-track'><div class='bar-fill' style='width:{tot_pct}%;background:{tot_clr}'></div></div>
+    for index, video in enumerate(uploaded_videos, start=1):
+        st.markdown(
+            html_block(
+                f"""
+                <div class='cand-header'>
+                    <span class='cand-icon'>🎬</span>
+                    <div>
+                        <div class='cand-name'>Candidate {index}</div>
+                        <div class='cand-file'>{video.name}</div>
                     </div>
                 </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """
+            ),
+            unsafe_allow_html=True,
+        )
+
+        video_bytes = video.getvalue()
+        st.video(video_bytes)
+
+        try:
+            with st.spinner(f"Analyzing Candidate {index} — building intelligence report…"):
+                analysis = CandidateAnalysis.from_dict(
+                    analyze_uploaded_video(video_bytes, video.name)
+                )
+        except Exception as exc:
+            st.error(f"Analysis failed for **{video.name}**: {exc}")
+            continue
+
+        if analysis.warnings:
+            for warning in analysis.warnings:
+                st.warning(warning)
+
+        # ── SCORE RINGS ──
+        emoji = emotion_emoji(analysis.dominant_emotion)
+        st.markdown(
+            html_block(
+                f"""
+                <div class='scores-panel'>
+                    {render_score_ring(analysis.confidence_score, "Confidence")}
+                    {render_score_ring(analysis.technical_score, "Technical")}
+                    {render_score_ring(analysis.overall_score, "Overall")}
+                    {render_score_ring(round(analysis.eye_contact_pct / 10, 1), "Eye Contact")}
+                    <div class='score-col'>
+                        <div class='emotion-chip'><span>{emoji}</span><span class='emotion-chip-text'>{analysis.dominant_emotion}</span></div>
+                        <div class='grade-display' style='color:{analysis.grade_color}'>{analysis.grade}</div>
+                        <div class='grade-label'>Grade</div>
+                    </div>
+                </div>
+                """
+            ),
+            unsafe_allow_html=True,
+        )
+
+        # ── SUMMARY CARDS ──
+        st.markdown(
+            "<div class='summary-grid'>"
+            + render_snapshot_card(analysis)
+            + render_insight_card("What Went Well", analysis.strengths, kind="strength", icon="✅")
+            + render_insight_card("Coaching Focus", analysis.concerns, kind="concern", icon="🎯")
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── SIGNAL BREAKDOWN ──
+        st.markdown(
+            html_block(
+                """
+                <div class='section-hd'>
+                    <div class='section-hd-icon'>📈</div>
+                    <div class='section-hd-text'>Signal Breakdown</div>
+                </div>
+                """
+            ),
+            unsafe_allow_html=True,
+        )
+        st.markdown(render_breakdown_grid(analysis.breakdown), unsafe_allow_html=True)
+
+        # ── EMOTION TIMELINE ──
+        st.markdown(
+            html_block(
+                """
+                <div class='section-hd'>
+                    <div class='section-hd-icon'>📊</div>
+                    <div class='section-hd-text'>Emotion Timeline</div>
+                </div>
+                """
+            ),
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f"<div class='timeline-wrap'>{render_emotion_timeline(analysis.emotion_timeline)}</div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── EXPANDERS ──
+        with st.expander("🔬 Model Details For This Candidate"):
+            for status in analysis.model_statuses:
+                st.markdown(f"**{status.label}**: `{status.active_backend}`")
+                st.caption(status.detail)
+
+        with st.expander("📝 Transcript"):
+            st.write(
+                analysis.transcript if analysis.transcript.strip()
+                else "_No speech detected in this video._"
+            )
+
+        # ── QA EVAL ──
+        st.markdown(
+            html_block(
+                """
+                <div class='section-hd'>
+                    <div class='section-hd-icon'>🧠</div>
+                    <div class='section-hd-text'>Answer Evaluation</div>
+                </div>
+                """
+            ),
+            unsafe_allow_html=True,
+        )
+        for result in analysis.technical_results:
+            badge = score_pill_class(result["Score"])
+            st.markdown(
+                html_block(
+                    f"""
+                    <div class='qa-card'>
+                        <div class='qa-question'>❓ {result['Question']}</div>
+                        <div class='qa-response-lbl'>Candidate Response Match</div>
+                        <div class='qa-response'>"{result['Best Match from Response']}"</div>
+                        <div class='qa-score-row'>
+                            <span class='score-pill {badge}'>{result['Score']}/10</span>
+                            <span class='relevance-txt'>Relevance: {result['Relevance']}/10</span>
+                        </div>
+                    </div>
+                    """
+                ),
+                unsafe_allow_html=True,
+            )
+
+        leaderboard.append(
+            {
+                "name":       video.name,
+                "emotion":    analysis.dominant_emotion,
+                "confidence": analysis.confidence_score,
+                "technical":  analysis.technical_score,
+                "total":      analysis.overall_score,
+            }
+        )
+        report_payload.append(
+            {
+                "candidate":        video.name,
+                "emotion":          analysis.dominant_emotion,
+                "grade":            analysis.grade,
+                "confidence_score": analysis.confidence_score,
+                "technical_score":  analysis.technical_score,
+                "overall_score":    analysis.overall_score,
+                "eye_contact_pct":  analysis.eye_contact_pct,
+                "breakdown":        analysis.breakdown,
+                "strengths":        analysis.strengths,
+                "concerns":         analysis.concerns,
+                "warnings":         analysis.warnings,
+                "technical_results":analysis.technical_results,
+            }
+        )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+    # ══ LEADERBOARD ══════════════════════════════════════════════════════════
+    if leaderboard:
+        st.markdown(
+            html_block(
+                """
+                <div class='section-hd' style='margin-top:40px'>
+                    <div class='section-hd-icon'>🏆</div>
+                    <div class='section-hd-text'>Candidate Ranking</div>
+                </div>
+                """
+            ),
+            unsafe_allow_html=True,
+        )
+
+        sorted_entries = sorted(leaderboard, key=lambda x: x["total"], reverse=True)
+        for rank, entry in enumerate(sorted_entries, start=1):
+            conf_col   = score_color(entry["confidence"])
+            tech_col   = score_color(entry["technical"])
+            total_col  = score_color(entry["total"])
+            first_cls  = "lb-first" if rank == 1 else ""
+            st.markdown(
+                html_block(
+                    f"""
+                    <div class='lb-card {first_cls}'>
+                        <div class='lb-rank'>{rank_medal(rank)}</div>
+                        <div class='lb-info'>
+                            <div class='lb-name'>{emotion_emoji(entry["emotion"])} {entry["name"]}</div>
+                            <div class='lb-emo'>{entry["emotion"].title()} dominant</div>
+                        </div>
+                        <div class='lb-scores'>
+                            <div class='lb-score-col'>
+                                <div class='lb-score-val' style='color:{conf_col}'>{entry["confidence"]}</div>
+                                <div class='lb-score-lbl'>Confidence</div>
+                                <div class='bar-track'><div class='bar-fill' style='width:{entry["confidence"]*10}%;background:{conf_col}'></div></div>
+                            </div>
+                            <div class='lb-score-col'>
+                                <div class='lb-score-val' style='color:{tech_col}'>{entry["technical"]}</div>
+                                <div class='lb-score-lbl'>Technical</div>
+                                <div class='bar-track'><div class='bar-fill' style='width:{entry["technical"]*10}%;background:{tech_col}'></div></div>
+                            </div>
+                            <div class='lb-score-col'>
+                                <div class='lb-score-val' style='color:{total_col}'>{entry["total"]}</div>
+                                <div class='lb-score-lbl'>Overall</div>
+                                <div class='bar-track'><div class='bar-fill' style='width:{entry["total"]*10}%;background:{total_col}'></div></div>
+                            </div>
+                        </div>
+                    </div>
+                    """
+                ),
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.download_button(
+            "⬇️  Download Full Report (JSON)",
+            data=json.dumps(report_payload, indent=2),
+            file_name="interviewiq-report.json",
+            mime="application/json",
+            use_container_width=True,
+        )
 
 else:
-    # Empty State
-    st.markdown("""
-    <div class='empty-state'>
-        <div class='empty-icon'>🎬</div>
-        <div class='empty-title'>No videos uploaded yet</div>
-        <div class='empty-desc'>
-            Upload interview recordings above to analyze confidence, expressions & answers
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    # ── EMPTY STATE ───────────────────────────────────────────────────────────
+    st.markdown(
+        html_block(
+            """
+            <div class='empty-state'>
+                <div class='empty-icon'>🎬</div>
+                <div class='empty-title'>Upload interview recordings to begin.</div>
+                <div class='empty-sub'>
+                    InterviewIQ evaluates confidence, answer quality, voice delivery,
+                    posture, gaze, and facial signals in one unified AI pass.
+                    Supports MP4, MOV, and WEBM formats.
+                </div>
+            </div>
+            """
+        ),
+        unsafe_allow_html=True,
+    )
 
-# Footer
-st.markdown("""
-<div class='footer'>
-    Built with ❤️ using Streamlit · Powered by Whisper, DeepFace, MediaPipe & Sentence-Transformers
-</div>
-""", unsafe_allow_html=True)
+# ════════════════════════════════════════════════════════════════════════════════
+# FOOTER
+# ════════════════════════════════════════════════════════════════════════════════
+st.markdown(
+    html_block(
+        """
+        <div class='app-footer'>
+            <span>InterviewIQ</span> · Custom CNN · Custom MLP · Random Forest ·
+            Whisper · MediaPipe · DeepFace · SentenceTransformers
+        </div>
+        """
+    ),
+    unsafe_allow_html=True,
+)
